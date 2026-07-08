@@ -113,12 +113,23 @@ export function streamQoder(
         );
       }
 
-      // Resolve user details from cached credentials
+      // Resolve user details from cached credentials (auth.json).
+      // If auth.json is missing or incomplete, we MUST NOT fall back to a
+      // placeholder userID — the Qoder gateway rejects requests with an
+      // unknown userID, returning HTTP 500 with no useful error detail.
+      // See: https://github.com/earendil-works/pi-provider-qoder/issues/XX
       const cachedCreds = getCachedCredentials(accessToken, model.provider);
-      const userID = cachedCreds?.userID || "qoder-user";
-      const name = cachedCreds?.name || (isQoderCNMode(providerMode) ? "Qoder CN User" : "Qoder User");
-      const email = cachedCreds?.email || getQoderUserEmailFallback(providerMode);
-      const machineID = cachedCreds?.machineID || getMachineId();
+      if (!cachedCreds?.userID) {
+        const providerLabel = isQoderCNMode(providerMode) ? "Qoder CN" : "Qoder";
+        throw new Error(
+          `${providerLabel} credentials file (~/.pi/agent/auth.json) is missing or does not contain userID. ` +
+            `Please re-login with "/login ${isQoderCNMode(providerMode) ? "qoder-cn" : "qoder"}" to regenerate it.`,
+        );
+      }
+      const userID = cachedCreds.userID;
+      const name = cachedCreds.name || (isQoderCNMode(providerMode) ? "Qoder CN User" : "Qoder User");
+      const email = cachedCreds.email || getQoderUserEmailFallback(providerMode);
+      const machineID = cachedCreds.machineID || getMachineId();
 
       const qoderModel = isQoderCNMode(providerMode) ? getQoderCNDirectModel(model.id) : model.id;
       const modelConfig = getCachedModelConfig(qoderModel, providerMode) || {
