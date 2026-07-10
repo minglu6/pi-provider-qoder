@@ -323,39 +323,55 @@ describe("jobToken refresh success contract (live VPC fixture)", () => {
     expect(fixture.token.startsWith("jt-")).toBe(true);
     expect(fixture.refresh_token.startsWith("jrt-")).toBe(true);
 
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify(fixture), { status: 200, headers: { "Content-Type": "application/json" } }),
-    );
-    vi.stubGlobal("fetch", fetchMock);
+    // Fixture is time-frozen: assert durations relative to created_at, not Date.now().
+    const createdAt = Date.parse(fixture.created_at);
+    const expiresAt = Date.parse(fixture.expires_at);
+    const refreshExpiresAt = Date.parse(fixture.refresh_token_expires_at);
+    expect(expiresAt - createdAt).toBe(fixture.expires_in);
+    expect(refreshExpiresAt - createdAt).toBe(fixture.refresh_token_expires_in);
 
-    const before = Date.now();
-    const result = await refreshJobToken("jrt-request-old", "cn");
-    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(JSON.parse(init.body as string)).toEqual({ refresh_token: "jrt-request-old" });
+    vi.useFakeTimers();
+    vi.setSystemTime(createdAt);
+    try {
+      const fetchMock = vi.fn().mockResolvedValue(
+        new Response(JSON.stringify(fixture), { status: 200, headers: { "Content-Type": "application/json" } }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
 
-    expect(result.jobToken).toBe(fixture.token);
-    expect(result.jobRefreshToken).toBe(fixture.refresh_token);
-    expect(result.jobRefreshToken).not.toBe("jrt-request-old"); // rotated
-    // Prefer expires_at over treating expires_in as seconds
-    const expected = Date.parse(fixture.expires_at);
-    expect(result.expiresAt).toBe(expected);
-    expect(result.expiresAt).toBeGreaterThan(before + 23 * 60 * 60 * 1000);
-    expect(result.expiresAt).toBeLessThan(before + 25 * 60 * 60 * 1000);
-    // Guard against mistaken seconds interpretation of expires_in
-    expect(result.expiresAt).not.toBe(before + fixture.expires_in * 1000);
+      const result = await refreshJobToken("jrt-request-old", "cn");
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(JSON.parse(init.body as string)).toEqual({ refresh_token: "jrt-request-old" });
+
+      expect(result.jobToken).toBe(fixture.token);
+      expect(result.jobRefreshToken).toBe(fixture.refresh_token);
+      expect(result.jobRefreshToken).not.toBe("jrt-request-old"); // rotated
+      // Prefer expires_at over treating expires_in as seconds
+      expect(result.expiresAt).toBe(expiresAt);
+      expect(result.expiresAt).toBe(createdAt + fixture.expires_in);
+      // Guard against mistaken seconds interpretation of expires_in
+      expect(result.expiresAt).not.toBe(Date.now() + fixture.expires_in * 1000);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("falls back to expires_in as milliseconds when expires_at is absent", async () => {
     process.env.QODER_VPC_INSTANCE = "example-tenant";
     const fixture = loadJobTokenRefreshSuccessFixture();
     const { expires_at, ...rest } = fixture;
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify(rest), { status: 200, headers: { "Content-Type": "application/json" } }),
-    );
-    vi.stubGlobal("fetch", fetchMock);
-    const before = Date.now();
-    const result = await refreshJobToken("jrt-old", "cn");
-    expect(result.expiresAt).toBeGreaterThanOrEqual(before + rest.expires_in - 50);
-    expect(result.expiresAt).toBeLessThanOrEqual(Date.now() + rest.expires_in + 50);
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.parse(fixture.created_at));
+    try {
+      const fetchMock = vi.fn().mockResolvedValue(
+        new Response(JSON.stringify(rest), { status: 200, headers: { "Content-Type": "application/json" } }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+      const result = await refreshJobToken("jrt-old", "cn");
+      expect(result.expiresAt).toBe(Date.now() + rest.expires_in);
+      // Guard against mistaken seconds interpretation
+      expect(result.expiresAt).not.toBe(Date.now() + rest.expires_in * 1000);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
