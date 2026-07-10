@@ -14,76 +14,48 @@ A [pi](https://shittycodingagent.ai/) provider extension that connects pi to the
 - **Dynamic Model Catalog**: Dynamically fetches model limits, effort configurations, and options from the `/algo/api/v2/model/list` endpoint.
 - **Reasoning/Thinking Support**: Real-time extraction of thinking process from API reasoning or HTML-like `<think>` tags.
 
-## Quick start
+## Quick Start
 
-### Install (OMP / this VPC branch)
+### Install
 
-The npm package name `pi-provider-qoder` on the public registry is the **upstream**
-package. To get the VPC / OMP fixes from this repository, install the **`vpc`**
-branch from GitHub instead of `npm:pi-provider-qoder`.
-
-Three supported ways (pick one):
-
-#### 1) OMP git install — recommended for most users
+#### 1. OMP git install (recommended)
 
 ```bash
-# If an older copy is already installed, remove it first:
+# Remove older copy if present
 omp plugin uninstall pi-provider-qoder
 
-omp plugin install github:minglu6/pi-provider-qoder#vpc
-# equivalent:
-# omp plugin install git+https://github.com/minglu6/pi-provider-qoder.git#vpc
+omp plugin install github:minglu6/pi-provider-qoder
 ```
 
-Then **fully restart OMP** (quit all windows; do not only open a new chat).
-Extension entry is read at process start.
-
-Verify:
+Restart OMP fully (quit all windows, not just open a new chat), then verify:
 
 ```bash
 omp plugin list
 omp plugin doctor
 ```
 
-You should see `pi-provider-qoder` enabled, with `pi.extensions` pointing at
-`./src/index.ts`.
+You should see `pi-provider-qoder` enabled, with `pi.extensions` pointing at `./src/index.ts`.
 
-#### 2) Local clone + link — recommended for contributors / Windows debugging
+#### 2. Local clone (for contributors / debugging)
 
 ```bash
-git clone --branch vpc --single-branch https://github.com/minglu6/pi-provider-qoder.git
+git clone https://github.com/minglu6/pi-provider-qoder.git
 cd pi-provider-qoder
 npm install
 omp plugin link "$(pwd)"
 ```
 
-Use this when you want to pull updates yourself, keep a local checkout, or
-debug loading issues. After `git pull`, restart OMP (and rebuild with
-`npm run build` if you rely on `dist/`).
+After `git pull`, restart OMP (and rebuild with `npm run build` if you rely on `dist/`).
 
-#### 3) npm registry — only if you intentionally want upstream
+#### 3. npm registry
 
 ```bash
-pi install npm:pi-provider-qoder
+omp plugin install npm:pi-provider-qoder
 # or
 npm install -g pi-provider-qoder
 ```
 
-This installs the **published upstream** package. It may **not** include this
-branch's VPC endpoint helpers, jrt-only refresh, or the Windows/OMP source
-entry. Prefer method 1 or 2 unless you know you want upstream.
-
-> This fork is not published as a separate npm package name yet. For sharing
-> with others, send them method 1 (or method 2).
-
-### Extension entry (Windows / OMP)
-
-`package.json` → `pi.extensions` is `./src/index.ts` (same pattern as some other
-OMP-linked providers). OMP loads the TypeScript source entry directly; `npm run
-build` still produces `dist/index.js` for compatibility, but local OMP installs
-should not depend on parsing the bundled `dist` file.
-
-### Log in
+### Login
 
 Global / international edition:
 
@@ -91,49 +63,38 @@ Global / international edition:
 /login qoder
 ```
 
-China / VPC edition (recommended for CN and enterprise VPC):
+China / VPC edition:
 
 ```text
 /login qoder-cn
 ```
 
-In CN/VPC environments `/provider` may show **two** Qoder rows from the same
-plugin: `Qoder CN (PAT)` (`qoder-cn`) and `Qoder (CN mode / PAT)` (`qoder`).
-Use the logged-in **`qoder-cn`** entry for VPC.
+In CN/VPC environments, `/provider` may show two Qoder rows from the same plugin: `Qoder CN (PAT)` (`qoder-cn`) and `Qoder (CN mode / PAT)` (`qoder`). Use the logged-in `qoder-cn` entry for VPC.
 
 ### Personal Access Token (PAT)
 
-A Qoder PAT (`pt-...`) cannot authenticate API calls directly — the provider
-exchanges it for a short-lived job token (mirroring the official `qodercli` /
-`qoderclicn` flow) and resolves your account identity automatically.
+A Qoder PAT (`pt-...`) cannot authenticate API calls directly — the provider exchanges it for a short-lived job token (mirroring the official `qodercli` / `qoderclicn` flow) and resolves your account identity automatically.
 
-Global Qoder:
+**Global Qoder:**
 
 - Run `/login qoder` and choose **Use API Key (PAT)**, then paste the token.
 - Or set `QODER_PERSONAL_ACCESS_TOKEN` (or `QODER_PAT`) before starting pi.
 
-Qoder China:
+**Qoder China:**
 
 - Run `/login qoder-cn`, then paste the CN PAT.
 - Or set `QODERCN_PERSONAL_ACCESS_TOKEN` (or `QODERCN_PAT`) before starting pi.
 - `QODER_API_KEY` is accepted as a CN PAT alias **only** when the value starts with `pt-`.
 
-> The exchanged job token (`jt-...`) is short-lived. After login the provider
-> persists a **job refresh token** (`jrt-...`) only — it does **not** store the
-> plaintext PAT. When the job token expires, the provider calls
-> `POST /api/v1/jobToken/refresh`. If refresh fails, log in again with a PAT.
+> The exchanged job token (`jt-...`) is short-lived. After login the provider persists a **job refresh token** (`jrt-...`) only — it does **not** store the plaintext PAT. When the job token expires, the provider calls `POST /api/v1/jobToken/refresh`. If refresh fails, log in again with a PAT.
 
 ### Region environment variables
-
-The provider also understands these optional variables:
 
 ```bash
 export QODER_REGION=cn       # or QODER_BACKEND=cn / QODER_MODE=cn
 ```
 
-Setting a CN PAT without a global PAT also auto-selects CN mode for the `qoder`
-entry, but the recommended explicit China entry is still `/login qoder-cn` and
-`--provider qoder-cn`.
+Setting a CN PAT without a global PAT also auto-selects CN mode for the `qoder` entry, but the recommended explicit China entry is still `/login qoder-cn` and `--provider qoder-cn`.
 
 ### Enterprise VPC
 
@@ -148,31 +109,17 @@ The provider derives the service-specific hosts expected by Qoder VPC:
 - `https://<instance>-gateway.vpc.qoder.com.cn`
 - `https://<instance>-openapi.vpc.qoder.com.cn`
 
-`QODER_VPC_ENDPOINT` and the official CLI variable `QODERCN_VPC_ENDPOINT`
-are accepted as aliases. The legacy `QODERCN_CLI_VPC_ENDPOINT` spelling is
-also accepted. Existing `QODER_CN_BASE_URL`,
-`QODER_CN_OPENAPI_URL`, and `QODER_CN_CENTER_URL` overrides remain supported;
-when they contain the tenant dashboard host, the provider normalizes them to
-the corresponding gateway or OpenAPI host.
+`QODER_VPC_ENDPOINT` and the official CLI variable `QODERCN_VPC_ENDPOINT` are accepted as aliases. The legacy `QODERCN_CLI_VPC_ENDPOINT` spelling is also accepted. Existing `QODER_CN_BASE_URL`, `QODER_CN_OPENAPI_URL`, and `QODER_CN_CENTER_URL` overrides remain supported; when they contain the tenant dashboard host, the provider normalizes them to the corresponding gateway or OpenAPI host.
 
-Important: `<instance>.vpc.qoder.com.cn` is the tenant dashboard host, not an
-API host. Sending PAT exchange or COSY chat there returns `CSRFInvalid`
-because it hits web/session middleware. Always use the derived `-gateway` /
-`-openapi` hosts above.
+> `<instance>.vpc.qoder.com.cn` is the tenant dashboard host, not an API host. Sending PAT exchange or COSY chat there returns `CSRFInvalid` because it hits web/session middleware. Always use the derived `-gateway` / `-openapi` hosts above.
 
-Use a PAT created by the VPC tenant (for example from
-`https://<instance>.vpc.qoder.com.cn/account/integrations`). A public/global
-PAT exchanged against the tenant OpenAPI host fails with
-`open_access_token not found`. The exchange payload must remain
-`personal_token`; verify PAT provisioning with the tenant administrator.
+Use a PAT created by the VPC tenant (for example from `https://<instance>.vpc.qoder.com.cn/account/integrations`). A public/global PAT exchanged against the tenant OpenAPI host fails with `open_access_token not found`. The exchange payload must remain `personal_token`; verify PAT provisioning with the tenant administrator.
 
-For safe request diagnostics, set `QODER_COSY_DEBUG=1`. Logs include the URL,
-status, and non-secret COSY signature inputs, but never credentials,
-Authorization, `Cosy-Key`, or machine identifiers.
+For safe request diagnostics, set `QODER_COSY_DEBUG=1`. Logs include the URL, status, and non-secret COSY signature inputs, but never credentials, Authorization, `Cosy-Key`, or machine identifiers.
 
 ## Endpoints
 
-Global:
+**Global:**
 
 - PAT exchange: `https://openapi.qoder.sh/api/v1/jobToken/exchange`
 - Job-token refresh: `https://openapi.qoder.sh/api/v1/jobToken/refresh`
@@ -180,7 +127,7 @@ Global:
 - Usage: `https://openapi.qoder.sh/api/v2/quota/usage`
 - Model / chat gateway: `https://api3.qoder.sh/algo/api/v2/...`
 
-China:
+**China:**
 
 - PAT exchange: `https://openapi.qoder.com.cn/api/v1/jobToken/exchange`
 - Job-token refresh: `https://openapi.qoder.com.cn/api/v1/jobToken/refresh`
@@ -188,9 +135,7 @@ China:
 - Usage: `https://openapi.qoder.com.cn/api/v2/quota/usage`
 - Model / chat gateway: `https://gateway.qoder.com.cn/algo/api/v2/...`
 
-Enterprise VPC (when `QODER_VPC_INSTANCE=<instance>` is set) uses the derived
-`-openapi` / `-gateway` hosts under `*.vpc.qoder.com.cn` instead of the public
-China hosts above.
+Enterprise VPC (when `QODER_VPC_INSTANCE=<instance>` is set) uses the derived `-openapi` / `-gateway` hosts under `*.vpc.qoder.com.cn` instead of the public China hosts above.
 
 ## Models
 
@@ -210,8 +155,7 @@ Exposes the backing model keys returned by Qoder, including:
 
 ### China `qoder-cn`
 
-The China provider exposes friendly model IDs and maps them back to Qoder CN's
-internal keys at request time:
+The China provider exposes friendly model IDs and maps them back to Qoder CN's internal keys at request time:
 
 | Friendly ID | Qoder CN key | Context | Images | Reasoning |
 | --- | --- | ---: | :---: | :---: |
@@ -225,8 +169,7 @@ internal keys at request time:
 | `kimi-k2.6` | `kmodel` | 256K | ✅ | ✅ |
 | `minimax-m2.7` | `mmodel` | 200K | ❌ | ❌ |
 
-Compatibility aliases are also accepted for request mapping, such as
-`qwen3.6-plus` → `qmodel`, `glm-5.1` → `gm51model`, and `minimax-m3` → `mmodel`.
+Compatibility aliases are also accepted for request mapping, such as `qwen3.6-plus` → `qmodel`, `glm-5.1` → `gm51model`, and `minimax-m3` → `mmodel`.
 
 ## Usage
 
@@ -255,11 +198,12 @@ src/
 ├── index.ts            # Extension registration
 ├── cosy.ts             # COSY signature, machine ID, region/endpoints, CN model aliases
 ├── login.ts            # OAuth device flow + PAT login sequence
+├── oauth.ts            # PAT / OAuth callback orchestrator
 ├── pat.ts              # PAT → job-token exchange + identity resolution
 ├── models.ts           # Model definitions and dynamic config cache
-├── oauth.ts            # PAT / OAuth callback orchestrator
 ├── stream.ts           # Main streaming response handler
 ├── transform.ts        # Message conversions (OpenAI schema mapping)
+├── usage.ts            # Usage / quota tracking
 ├── thinking-parser.ts  # Fallback <think> tag parser
 └── qoder-encoding.ts   # WAF bypass body encoder
 ```
