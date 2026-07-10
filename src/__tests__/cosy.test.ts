@@ -27,6 +27,15 @@ const endpointEnvNames = [
   "QODER_VPC_ENDPOINT",
   "QODERCN_VPC_ENDPOINT",
   "QODERCN_CLI_VPC_ENDPOINT",
+  // PAT env vars force CN mode in getQoderMode(); isolate tests from host env.
+  "QODERCN_PERSONAL_ACCESS_TOKEN",
+  "QODERCN_PAT",
+  "QODER_PERSONAL_ACCESS_TOKEN",
+  "QODER_PAT",
+  "QODER_API_KEY",
+  "QODER_REGION",
+  "QODER_BACKEND",
+  "QODER_MODE",
 ] as const;
 const originalEndpointEnv = Object.fromEntries(endpointEnvNames.map((name) => [name, process.env[name]]));
 

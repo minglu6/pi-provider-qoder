@@ -25,6 +25,12 @@ export interface PatExchangeResult {
   expiresAt: number;
 }
 
+export interface QoderUserInfo {
+  userID: string;
+  email: string;
+  name: string;
+}
+
 export function isPatRefresh(refresh: string): boolean {
   return refresh.startsWith(`${PAT_REFRESH_PREFIX}|`);
 }
@@ -102,8 +108,12 @@ export async function exchangeJobToken(pat: string, mode: string = getQoderMode(
   };
 }
 
-/** Fetch user profile using a job token (jt-...). Best-effort. */
-async function fetchUserInfo(jobToken: string, mode: string): Promise<{ userID: string; email: string; name: string }> {
+/**
+ * Fetch user profile using a job/access token (jt-...).
+ * Returns empty fields when the request fails; callers that require identity
+ * (login) must fail-fast on empty userID.
+ */
+export async function fetchUserInfo(jobToken: string, mode: string): Promise<QoderUserInfo> {
   let userID = "";
   let email = "";
   let name = "";
@@ -128,7 +138,9 @@ async function fetchUserInfo(jobToken: string, mode: string): Promise<{ userID: 
       email = info.email || "";
       name = info.name || info.username || "";
     }
-  } catch {}
+  } catch {
+    // Callers decide whether empty identity is fatal.
+  }
   return { userID, email, name };
 }
 
@@ -136,10 +148,20 @@ async function fetchUserInfo(jobToken: string, mode: string): Promise<{ userID: 
  * Build full Qoder credentials from a Personal Access Token.
  * Exchanges the PAT for a job token, resolves identity, and encodes the PAT
  * into the refresh field so the token can be re-exchanged on expiry.
+ *
+ * Fails if userinfo does not return a non-empty userID — otherwise login would
+ * succeed while the first chat request fails with a missing-identity error.
  */
 export async function credentialsFromPat(pat: string, mode: string = getQoderMode()): Promise<OAuthCredentials> {
   const { jobToken, jobRefreshToken, expiresAt } = await exchangeJobToken(pat, mode);
   const { userID, email, name } = await fetchUserInfo(jobToken, mode);
+  if (!userID) {
+    throw new Error(
+      isQoderCNMode(mode)
+        ? "Qoder CN login failed: userinfo did not return userID. Check VPC routing (QODER_VPC_INSTANCE) and PAT validity, then retry."
+        : "Qoder login failed: userinfo did not return userID. Check network/PAT validity, then retry.",
+    );
+  }
   const machineID = getMachineId();
 
   return {

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { decodePatRefresh, encodePatRefresh, exchangeJobToken, isPatRefresh, PAT_REFRESH_PREFIX } from "../pat.js";
+import { credentialsFromPat, decodePatRefresh, encodePatRefresh, exchangeJobToken, isPatRefresh, PAT_REFRESH_PREFIX } from "../pat.js";
 
 const endpointEnvNames = [
   "QODER_CN_BASE_URL",
@@ -114,5 +114,62 @@ describe("exchangeJobToken", () => {
     expect(url).toBe("https://example-tenant-openapi.vpc.qoder.com.cn/api/v1/jobToken/exchange");
     expect(JSON.parse(init.body as string)).toEqual({ personal_token: "pt-test" });
     expect(JSON.parse(init.body as string)).not.toHaveProperty("open_access_token");
+  });
+});
+
+
+describe("credentialsFromPat", () => {
+  it("fails fast when userinfo returns empty userID", async () => {
+    process.env.QODER_VPC_INSTANCE = "example-tenant";
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            token: "jt-test",
+            refresh_token: "jrt-test",
+            expires_in: 60_000,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ email: "x@y.z" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(credentialsFromPat("pt-test", "cn")).rejects.toThrow(/userinfo did not return userID/i);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns credentials when userinfo includes userID", async () => {
+    process.env.QODER_VPC_INSTANCE = "example-tenant";
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            token: "jt-ok",
+            refresh_token: "jrt-ok",
+            expires_in: 60_000,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ id: "user-ok", email: "ok@example.com", name: "Ok" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const creds = await credentialsFromPat("pt-test", "cn");
+    expect((creds as { userID?: string }).userID).toBe("user-ok");
+    expect(creds.access).toBe("jt-ok");
+    expect(creds.refresh.startsWith("pat|pt-test|jrt-ok|user-ok|")).toBe(true);
   });
 });

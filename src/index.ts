@@ -8,7 +8,7 @@ import {
   toQoderCNFriendlyModel,
 } from "./cosy.js";
 import { getCachedModels, isCacheStale, staticCnModels, staticModels, updateQoderModelsCache } from "./models.js";
-import { getCachedCredentials, loginQoder, loginQoderCN, refreshQoderToken, refreshQoderTokenCN } from "./oauth.js";
+import { loginQoder, loginQoderCN, refreshQoderToken, refreshQoderTokenCN, resolveQoderIdentity } from "./oauth.js";
 import { streamQoder } from "./stream.js";
 import { fetchQoderUsage, fetchQoderUsageCN } from "./usage.js";
 
@@ -70,9 +70,8 @@ export default function (pi: ExtensionAPI) {
       try {
         const accessToken = await ctx.modelRegistry.getApiKeyForProvider(providerID);
         if (!accessToken || !isCacheStale(mode)) continue;
-        const creds = getCachedCredentials(accessToken, providerID);
-        // Skip model cache refresh if we cannot resolve a real userID.
-        // Calling the Qoder gateway with a placeholder userID causes HTTP 500.
+        // Prefer auth.json, else /userinfo(access). Never use a placeholder userID.
+        const creds = await resolveQoderIdentity(accessToken, providerID, mode);
         if (!creds?.userID) continue;
         const userID = creds.userID;
         const name = creds.name || (isQoderCNMode(mode) ? "Qoder CN User" : "Qoder User");
