@@ -16,8 +16,18 @@
   ],
   "files": [
     "dist",
-    "src",
-    "README.md"
+    "README.md",
+    "src/cosy.ts",
+    "src/index.ts",
+    "src/login.ts",
+    "src/models.ts",
+    "src/oauth.ts",
+    "src/pat.ts",
+    "src/qoder-encoding.ts",
+    "src/stream.ts",
+    "src/thinking-parser.ts",
+    "src/transform.ts",
+    "src/usage.ts"
   ],
   "scripts": {
     "build": "node scripts/build.mjs",
