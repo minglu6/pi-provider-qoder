@@ -111,7 +111,7 @@ export function streamQoder(
       if (!accessToken) {
         throw new Error(
           isQoderCNMode(providerMode)
-            ? "Qoder CN credentials not set. Run /login qoder-cn or set QODERCN_PERSONAL_ACCESS_TOKEN."
+            ? "Qoder CN credentials not set. Run /login qoder-cn or set QODERCN_PERSONAL_ACCESS_TOKEN / QODERCN_PAT (or QODER_API_KEY=pt-...)."
             : "Qoder credentials not set. Run /login qoder or set QODER_PERSONAL_ACCESS_TOKEN.",
         );
       }

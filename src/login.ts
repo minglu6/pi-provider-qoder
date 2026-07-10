@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
-import { getMachineId, getQoderMode, isQoderCNMode } from "./cosy.js";
+import { getMachineId, getQoderIntegrationsUrl, getQoderMode, isQoderCNMode } from "./cosy.js";
 import { credentialsFromPat } from "./pat.js";
 
 type PromptFn = (p: { message: string; placeholder?: string; allowEmpty?: boolean }) => Promise<string>;
@@ -59,7 +59,8 @@ export async function interactiveLogin(
 
   if (isQoderCNMode(mode)) {
     throw new Error(
-      "Qoder CN browser login is not supported here. Paste a Qoder CN PAT from https://qoder.com.cn/account/integrations or set QODERCN_PERSONAL_ACCESS_TOKEN.",
+      `Qoder CN browser login is not supported here. Paste a Qoder CN PAT from ${getQoderIntegrationsUrl(mode)} ` +
+        "or set QODERCN_PERSONAL_ACCESS_TOKEN / QODERCN_PAT (or QODER_API_KEY=pt-...).",
     );
   }
 

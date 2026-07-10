@@ -57,6 +57,7 @@ Qoder China:
 
 - Run `/login qoder-cn`, then paste the CN PAT.
 - Or set `QODERCN_PERSONAL_ACCESS_TOKEN` (or `QODERCN_PAT`) before starting pi.
+- `QODER_API_KEY` is accepted as a CN PAT alias **only** when the value starts with `pt-`.
 
 > The exchanged job token is short-lived; the provider transparently re-exchanges
 > the stored PAT when it expires.
