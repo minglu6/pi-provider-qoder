@@ -32,9 +32,17 @@ function modelsForProvider(mode: string, providerID: string): Model<Api>[] {
   }) as unknown as Model<Api>[];
 }
 
+function oauthDisplayName(providerID: string, mode: string): string {
+  // Always distinguish by providerID. When getQoderMode() is "cn", both
+  // `qoder` and `qoder-cn` would otherwise show as "Qoder CN (PAT)" in /provider.
+  if (providerID === "qoder-cn") return "Qoder CN (PAT)";
+  if (isQoderCNMode(mode)) return "Qoder (CN mode / PAT)";
+  return "Qoder (Browser OAuth / PAT)";
+}
+
 function createQoderOAuth(providerID: string, mode: string): OAuthConfigWithUsage {
   return {
-    name: isQoderCNMode(mode) ? "Qoder CN (PAT)" : "Qoder (Browser OAuth / PAT)",
+    name: oauthDisplayName(providerID, mode),
     login: isQoderCNMode(mode) ? loginQoderCN : loginQoder,
     refreshToken: isQoderCNMode(mode) ? refreshQoderTokenCN : refreshQoderToken,
     getApiKey: (cred: OAuthCredentials) => cred.access,
