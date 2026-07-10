@@ -90,7 +90,9 @@ export function decodePatRefresh(refresh: string): {
  * Exchange a Qoder Personal Access Token (pt-...) for a short-lived Job Token
  * (jt-...). PATs cannot authenticate API calls directly; they must first be
  * exchanged. This mirrors the official qodercli/qoderclicn flow:
- *   POST /api/v1/jobToken/exchange { personal_token } -> { token, refresh_token, expires_at }
+ *   POST /api/v1/jobToken/exchange { personal_token }
+ *     -> { token, refresh_token, expires_at, expires_in, ... }
+ * expires_in is milliseconds on VPC/CN OpenAPI (same as /jobToken/refresh).
  * The exchange endpoint does not require a COSY signature.
  */
 export async function exchangeJobToken(pat: string, mode: string = getQoderMode()): Promise<PatExchangeResult> {
@@ -114,8 +116,11 @@ export async function exchangeJobToken(pat: string, mode: string = getQoderMode(
   const data = (await res.json()) as {
     token?: string;
     refresh_token?: string;
+    created_at?: string;
     expires_at?: string;
-    expires_in?: number;
+    expires_in?: number; // milliseconds on VPC/CN OpenAPI
+    refresh_token_expires_at?: string;
+    refresh_token_expires_in?: number; // milliseconds
   };
 
   if (!data.token) {
@@ -140,7 +145,20 @@ export async function exchangeJobToken(pat: string, mode: string = getQoderMode(
 
 /**
  * Refresh a short-lived job token using the server-issued job refresh token (jrt-...).
- * POST /api/v1/jobToken/refresh { refresh_token } -> { token, refresh_token, expires_at }
+ * POST /api/v1/jobToken/refresh { refresh_token }
+ *
+ * Live VPC success body (2026-07-10, desensitized probe):
+ * {
+ *   token,                      // jt-...
+ *   refresh_token,              // jrt-... (rotated; differs from request)
+ *   created_at,                 // ISO-8601 UTC
+ *   expires_at,                 // ISO-8601 UTC (~ +24h)
+ *   expires_in,                 // milliseconds (86400000)
+ *   refresh_token_expires_at,   // ISO-8601 UTC (~ +48h)
+ *   refresh_token_expires_in    // milliseconds (172800000)
+ * }
+ *
+ * Parsing rules: prefer expires_at; treat expires_in as ms; persist rotated refresh_token.
  */
 export async function refreshJobToken(
   jobRefreshToken: string,
@@ -172,8 +190,11 @@ export async function refreshJobToken(
   const data = (await res.json()) as {
     token?: string;
     refresh_token?: string;
+    created_at?: string;
     expires_at?: string;
-    expires_in?: number;
+    expires_in?: number; // milliseconds on VPC/CN OpenAPI
+    refresh_token_expires_at?: string;
+    refresh_token_expires_in?: number; // milliseconds
   };
 
   if (!data.token) {

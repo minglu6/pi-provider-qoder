@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   credentialsFromPat,
@@ -23,6 +26,19 @@ const endpointEnvNames = [
   "QODER_VPC_INSTANCE",
 ] as const;
 const originalEndpointEnv = Object.fromEntries(endpointEnvNames.map((name) => [name, process.env[name]]));
+const fixturesDir = join(dirname(fileURLToPath(import.meta.url)), "fixtures");
+function loadJobTokenRefreshSuccessFixture() {
+  return JSON.parse(readFileSync(join(fixturesDir, "jobtoken-refresh.success.json"), "utf-8")) as {
+    token: string;
+    refresh_token: string;
+    created_at: string;
+    expires_at: string;
+    expires_in: number;
+    refresh_token_expires_at: string;
+    refresh_token_expires_in: number;
+  };
+}
+
 
 beforeEach(() => {
   for (const name of endpointEnvNames) delete process.env[name];
@@ -286,5 +302,60 @@ describe("refreshQoderTokenCN without persisting PAT", () => {
     expect(refreshed.refresh).toBe("jrt|jrt-from-jrt|user-1|machine-1");
     expect(refreshed.refresh).not.toContain("pt-should-not-persist");
     expect(JSON.stringify(refreshed)).not.toContain("pt-should-not-persist");
+  });
+});
+
+describe("jobToken refresh success contract (live VPC fixture)", () => {
+  it("parses the observed success body: ms expires_in, rotated refresh_token, prefer expires_at", async () => {
+    process.env.QODER_VPC_INSTANCE = "sungrow-of-enterprise";
+    const fixture = loadJobTokenRefreshSuccessFixture();
+    expect(Object.keys(fixture).sort()).toEqual([
+      "created_at",
+      "expires_at",
+      "expires_in",
+      "refresh_token",
+      "refresh_token_expires_at",
+      "refresh_token_expires_in",
+      "token",
+    ]);
+    expect(fixture.expires_in).toBe(86_400_000); // 24h in milliseconds
+    expect(fixture.refresh_token_expires_in).toBe(172_800_000); // 48h in milliseconds
+    expect(fixture.token.startsWith("jt-")).toBe(true);
+    expect(fixture.refresh_token.startsWith("jrt-")).toBe(true);
+
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(fixture), { status: 200, headers: { "Content-Type": "application/json" } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const before = Date.now();
+    const result = await refreshJobToken("jrt-request-old", "cn");
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({ refresh_token: "jrt-request-old" });
+
+    expect(result.jobToken).toBe(fixture.token);
+    expect(result.jobRefreshToken).toBe(fixture.refresh_token);
+    expect(result.jobRefreshToken).not.toBe("jrt-request-old"); // rotated
+    // Prefer expires_at over treating expires_in as seconds
+    const expected = Date.parse(fixture.expires_at);
+    expect(result.expiresAt).toBe(expected);
+    expect(result.expiresAt).toBeGreaterThan(before + 23 * 60 * 60 * 1000);
+    expect(result.expiresAt).toBeLessThan(before + 25 * 60 * 60 * 1000);
+    // Guard against mistaken seconds interpretation of expires_in
+    expect(result.expiresAt).not.toBe(before + fixture.expires_in * 1000);
+  });
+
+  it("falls back to expires_in as milliseconds when expires_at is absent", async () => {
+    process.env.QODER_VPC_INSTANCE = "example-tenant";
+    const fixture = loadJobTokenRefreshSuccessFixture();
+    const { expires_at, ...rest } = fixture;
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(rest), { status: 200, headers: { "Content-Type": "application/json" } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const before = Date.now();
+    const result = await refreshJobToken("jrt-old", "cn");
+    expect(result.expiresAt).toBeGreaterThanOrEqual(before + rest.expires_in - 50);
+    expect(result.expiresAt).toBeLessThanOrEqual(Date.now() + rest.expires_in + 50);
   });
 });
