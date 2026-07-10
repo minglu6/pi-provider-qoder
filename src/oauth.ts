@@ -13,7 +13,14 @@ import {
 } from "./cosy.js";
 import { interactiveLogin } from "./login.js";
 import { updateQoderModelsCache } from "./models.js";
-import { credentialsFromPat, decodePatRefresh, fetchUserInfo, isPatRefresh } from "./pat.js";
+import {
+  credentialsFromJobTokens,
+  credentialsFromPat,
+  decodePatRefresh,
+  fetchUserInfo,
+  isPatRefresh,
+  refreshJobToken,
+} from "./pat.js";
 
 export interface QoderCredentials extends OAuthCredentials {
   userID: string;
@@ -35,7 +42,7 @@ const AUTH_FILE = join(homedir(), ".pi", "agent", "auth.json");
 /**
  * Process-local identity cache.
  * Key: providerID + SHA-256(accessToken). Value: identity fields only.
- * Never stores access/refresh (refresh may embed a plaintext PAT).
+ * Never stores access/refresh (refresh holds jrt + identity only).
  */
 const identityMemoryCache = new Map<string, QoderIdentity>();
 
@@ -239,24 +246,78 @@ export async function refreshQoderTokenCN(credentials: OAuthCredentials): Promis
 }
 
 async function refreshQoderTokenForMode(credentials: OAuthCredentials, mode: string): Promise<OAuthCredentials> {
-  // PAT-based credentials: re-exchange the stored PAT for a fresh job token.
+  // Job-token credentials: refresh via jrt. Never re-persist a plaintext PAT.
   if (isPatRefresh(credentials.refresh)) {
-    const { pat } = decodePatRefresh(credentials.refresh);
-    if (pat) {
-      try {
-        const refreshed = await credentialsFromPat(pat, mode);
-        const qCreds = refreshed as QoderCredentials;
+    const decoded = decodePatRefresh(credentials.refresh);
+    const prev = credentials as Partial<QoderCredentials>;
+    const userID = decoded.userID || prev.userID || "";
+    const machineID = decoded.machineID || prev.machineID || getMachineId();
+    const email = prev.email || "";
+    const name = prev.name || "";
+    const providerLabel = isQoderCNMode(mode) ? "Qoder CN" : "Qoder";
+
+    const finalize = (refreshed: OAuthCredentials): OAuthCredentials => {
+      if (typeof refreshed.refresh === "string") {
+        const parts = refreshed.refresh.split("|");
+        if (parts.some((part) => part.startsWith("pt-") || (decoded.pat && part === decoded.pat))) {
+          throw new Error(`${providerLabel} refresh refused to persist a plaintext PAT in refresh`);
+        }
+      }
+      const qCreds = refreshed as QoderCredentials;
+      if (qCreds.userID) {
         rememberQoderIdentity(providerIDForMode(mode), qCreds);
         updateQoderModelsCache(qCreds.access, qCreds.userID, qCreds.name, qCreds.email, mode).catch(() => {});
-        return refreshed;
+      }
+      return refreshed;
+    };
+
+    // 1) Preferred: server jrt refresh.
+    if (decoded.jobRefreshToken) {
+      try {
+        const exchange = await refreshJobToken(decoded.jobRefreshToken, mode);
+        return finalize(
+          credentialsFromJobTokens(
+            exchange,
+            {
+              userID: userID || (credentials as QoderCredentials).userID,
+              email,
+              name,
+              machineID,
+            },
+            mode,
+          ),
+        );
       } catch {
-        // Fall through to validity extension below.
+        // Fall through to one-shot env PAT / legacy migrate.
       }
     }
-    return {
-      ...credentials,
-      expires: Date.now() + 60 * 60 * 1000, // extend 1 hour to retry later
-    };
+
+    // 2) One-shot env PAT (not from persisted refresh).
+    const envPat = isQoderCNMode(mode)
+      ? getQoderCNPat()
+      : process.env.QODER_PERSONAL_ACCESS_TOKEN || process.env.QODER_PAT || "";
+    if (envPat) {
+      try {
+        return finalize(await credentialsFromPat(envPat, mode));
+      } catch {
+        // Fall through.
+      }
+    }
+
+    // 3) Legacy migrate: if an old refresh still embeds a PAT, use it once to
+    //    obtain jrt-only credentials — then never write the PAT back.
+    if (decoded.legacyEmbeddedPat && decoded.pat) {
+      try {
+        return finalize(await credentialsFromPat(decoded.pat, mode));
+      } catch {
+        // Fall through to hard failure.
+      }
+    }
+
+    throw new Error(
+      `${providerLabel} job token refresh failed. Re-login with "/login ${isQoderCNMode(mode) ? "qoder-cn" : "qoder"}". ` +
+        `PAT is no longer stored in refresh; set a PAT env var only for one-shot login, or paste it interactively.`,
+    );
   }
 
   const parts = credentials.refresh.split("|");

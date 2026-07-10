@@ -8,6 +8,7 @@ import {
   getQoderCNFriendlyModelInfo,
   getQoderCNPat,
   getQoderExchangeURL,
+  getQoderJobTokenRefreshURL,
   getQoderIntegrationsUrl,
   getQoderManageUrl,
   getQoderMode,
@@ -207,6 +208,19 @@ describe("getQoderExchangeURL", () => {
 
   it("constructs correct global URL", () => {
     expect(getQoderExchangeURL("global")).toBe("https://openapi.qoder.sh/api/v1/jobToken/exchange");
+  });
+});
+
+describe("getQoderJobTokenRefreshURL", () => {
+  it("constructs correct CN URL", () => {
+    expect(getQoderJobTokenRefreshURL("cn")).toBe("https://openapi.qoder.com.cn/api/v1/jobToken/refresh");
+  });
+
+  it("constructs VPC URL when instance is set", () => {
+    process.env.QODER_VPC_INSTANCE = "sungrow-of-enterprise";
+    expect(getQoderJobTokenRefreshURL("cn")).toBe(
+      "https://sungrow-of-enterprise-openapi.vpc.qoder.com.cn/api/v1/jobToken/refresh",
+    );
   });
 });
 

@@ -159,6 +159,10 @@ export function getQoderExchangeURL(mode?: string): string {
   return `${getQoderOpenApiUrl(mode)}/api/v1/jobToken/exchange`;
 }
 
+export function getQoderJobTokenRefreshURL(mode?: string): string {
+  return `${getQoderOpenApiUrl(mode)}/api/v1/jobToken/refresh`;
+}
+
 export function getQoderUserInfoURL(mode?: string): string {
   return `${getQoderOpenApiUrl(mode)}/api/v1/userinfo`;
 }

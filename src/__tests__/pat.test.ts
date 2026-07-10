@@ -1,5 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { credentialsFromPat, decodePatRefresh, encodePatRefresh, exchangeJobToken, isPatRefresh, PAT_REFRESH_PREFIX } from "../pat.js";
+import {
+  credentialsFromPat,
+  decodePatRefresh,
+  encodeJobRefresh,
+  encodePatRefresh,
+  exchangeJobToken,
+  isPatRefresh,
+  JRT_REFRESH_PREFIX,
+  PAT_REFRESH_PREFIX,
+  refreshJobToken,
+} from "../pat.js";
+import { getQoderJobTokenRefreshURL } from "../cosy.js";
+import { refreshQoderTokenCN } from "../oauth.js";
 
 const endpointEnvNames = [
   "QODER_CN_BASE_URL",
@@ -28,15 +40,20 @@ afterEach(() => {
 // ── isPatRefresh ──────────────────────────────────────────────────────────
 
 describe("isPatRefresh", () => {
-  it("returns true for PAT refresh strings", () => {
-    expect(isPatRefresh("pat|mytoken|refresh123|user1|machine1")).toBe(true);
+  it("returns true for legacy PAT refresh strings", () => {
+    expect(isPatRefresh("pat|pt-mytoken|jrt-123|user1|machine1")).toBe(true);
   });
 
-  it("returns true for minimal PAT prefix", () => {
+  it("returns true for jrt-only refresh strings", () => {
+    expect(isPatRefresh("jrt|jrt-123|user1|machine1")).toBe(true);
+  });
+
+  it("returns true for minimal prefixes", () => {
     expect(isPatRefresh("pat|")).toBe(true);
+    expect(isPatRefresh("jrt|")).toBe(true);
   });
 
-  it("returns false for non-PAT refresh strings", () => {
+  it("returns false for non-job refresh strings", () => {
     expect(isPatRefresh("some-other-refresh-token")).toBe(false);
     expect(isPatRefresh("refresh|user|machine")).toBe(false);
   });
@@ -48,41 +65,50 @@ describe("isPatRefresh", () => {
 
 // ── encodePatRefresh / decodePatRefresh ───────────────────────────────────
 
-describe("encodePatRefresh / decodePatRefresh roundtrip", () => {
-  it("encodes and decodes correctly", () => {
-    const encoded = encodePatRefresh("pt-abc123", "jrt-xyz", "user-42", "machine-7");
-    expect(encoded).toBe("pat|pt-abc123|jrt-xyz|user-42|machine-7");
+describe("encodeJobRefresh / decodePatRefresh", () => {
+  it("encodes jrt-only refresh without PAT", () => {
+    const encoded = encodeJobRefresh("jrt-xyz", "user-42", "machine-7");
+    expect(encoded).toBe("jrt|jrt-xyz|user-42|machine-7");
+    expect(encoded).not.toContain("pt-");
 
     const decoded = decodePatRefresh(encoded);
+    expect(decoded).toEqual({
+      pat: "",
+      jobRefreshToken: "jrt-xyz",
+      userID: "user-42",
+      machineID: "machine-7",
+      legacyEmbeddedPat: false,
+    });
+  });
+
+  it("encodePatRefresh ignores PAT and emits jrt-only", () => {
+    const encoded = encodePatRefresh("pt-abc123", "jrt-xyz", "user-42", "machine-7");
+    expect(encoded).toBe("jrt|jrt-xyz|user-42|machine-7");
+    expect(encoded).not.toContain("pt-abc123");
+  });
+
+  it("decodes legacy pat|pt|jrt|user|machine format", () => {
+    const decoded = decodePatRefresh("pat|pt-abc123|jrt-xyz|user-42|machine-7");
     expect(decoded).toEqual({
       pat: "pt-abc123",
       jobRefreshToken: "jrt-xyz",
       userID: "user-42",
       machineID: "machine-7",
+      legacyEmbeddedPat: true,
     });
   });
 
-  it("handles empty fields", () => {
-    const encoded = encodePatRefresh("", "", "", "");
-    expect(encoded).toBe("pat||||");
-
+  it("handles empty jrt fields", () => {
+    const encoded = encodeJobRefresh("", "", "");
+    expect(encoded).toBe("jrt|||");
     const decoded = decodePatRefresh(encoded);
     expect(decoded).toEqual({
       pat: "",
       jobRefreshToken: "",
       userID: "",
       machineID: "",
+      legacyEmbeddedPat: false,
     });
-  });
-
-  it("handles pipe characters in fields gracefully", () => {
-    // The decode splits on |, so extra pipes shift fields
-    const encoded = encodePatRefresh("pt-test", "jrt-ok", "u1", "m1");
-    const decoded = decodePatRefresh(encoded);
-    expect(decoded.pat).toBe("pt-test");
-    expect(decoded.jobRefreshToken).toBe("jrt-ok");
-    expect(decoded.userID).toBe("u1");
-    expect(decoded.machineID).toBe("m1");
   });
 });
 
@@ -170,6 +196,95 @@ describe("credentialsFromPat", () => {
     const creds = await credentialsFromPat("pt-test", "cn");
     expect((creds as { userID?: string }).userID).toBe("user-ok");
     expect(creds.access).toBe("jt-ok");
-    expect(creds.refresh.startsWith("pat|pt-test|jrt-ok|user-ok|")).toBe(true);
+    expect(creds.refresh.startsWith("jrt|jrt-ok|user-ok|")).toBe(true);
+    expect(creds.refresh).not.toContain("pt-test");
+    expect(creds.refresh.split("|").some((p) => p.startsWith("pt-"))).toBe(false);
+  });
+});
+
+describe("refreshJobToken", () => {
+  it("posts refresh_token to the VPC jobToken refresh endpoint", async () => {
+    process.env.QODER_VPC_INSTANCE = "example-tenant";
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          token: "jt-new",
+          refresh_token: "jrt-new",
+          expires_in: 3600000,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await refreshJobToken("jrt-old", "cn");
+    expect(result.jobToken).toBe("jt-new");
+    expect(result.jobRefreshToken).toBe("jrt-new");
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("https://example-tenant-openapi.vpc.qoder.com.cn/api/v1/jobToken/refresh");
+    expect(url).toBe(getQoderJobTokenRefreshURL("cn"));
+    expect(JSON.parse(init.body as string)).toEqual({ refresh_token: "jrt-old" });
+  });
+});
+
+describe("refreshQoderTokenCN without persisting PAT", () => {
+  it("refreshes via jrt and returns credentials without pt-", async () => {
+    process.env.QODER_VPC_INSTANCE = "example-tenant";
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          token: "jt-refreshed",
+          refresh_token: "jrt-rotated",
+          expires_in: 3600000,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const refreshed = await refreshQoderTokenCN({
+      access: "jt-old",
+      refresh: "jrt|jrt-old|user-1|machine-1",
+      expires: Date.now() - 1000,
+      userID: "user-1",
+      email: "u@example.com",
+      name: "User",
+      machineID: "machine-1",
+    } as any);
+
+    expect(refreshed.access).toBe("jt-refreshed");
+    expect(refreshed.refresh).toBe("jrt|jrt-rotated|user-1|machine-1");
+    expect(refreshed.refresh.split("|").some((p) => p.startsWith("pt-"))).toBe(false);
+    expect(JSON.stringify(refreshed)).not.toContain("pt-");
+  });
+
+  it("migrates legacy pat|pt|jrt refresh to jrt-only via env-less jrt path", async () => {
+    process.env.QODER_VPC_INSTANCE = "example-tenant";
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          token: "jt-from-jrt",
+          refresh_token: "jrt-from-jrt",
+          expires_in: 3600000,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const refreshed = await refreshQoderTokenCN({
+      access: "jt-old",
+      refresh: "pat|pt-should-not-persist|jrt-legacy|user-1|machine-1",
+      expires: Date.now() - 1000,
+      userID: "user-1",
+      email: "u@example.com",
+      name: "User",
+      machineID: "machine-1",
+    } as any);
+
+    expect(refreshed.access).toBe("jt-from-jrt");
+    expect(refreshed.refresh).toBe("jrt|jrt-from-jrt|user-1|machine-1");
+    expect(refreshed.refresh).not.toContain("pt-should-not-persist");
+    expect(JSON.stringify(refreshed)).not.toContain("pt-should-not-persist");
   });
 });
