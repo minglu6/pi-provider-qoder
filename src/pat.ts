@@ -1,5 +1,6 @@
 import type { OAuthCredentials } from "@earendil-works/pi-ai";
 import {
+  formatQoderHttpError,
   getMachineId,
   getQoderExchangeURL,
   getQoderMode,
@@ -71,7 +72,7 @@ export async function exchangeJobToken(pat: string, mode: string = getQoderMode(
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`Qoder PAT exchange failed: ${res.status} ${res.statusText}. ${text.slice(0, 200)}`);
+    throw new Error(formatQoderHttpError("pat-exchange", res.status, res.statusText, text, getQoderExchangeURL(mode)));
   }
 
   const data = (await res.json()) as {

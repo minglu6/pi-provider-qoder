@@ -8,6 +8,8 @@ import {
   getQoderMode,
   getQoderModelListURL,
   isQoderCNMode,
+  logCosyRequest,
+  logCosyResponse,
 } from "./cosy.js";
 
 export const ZERO_COST = Object.freeze({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
@@ -422,6 +424,7 @@ export async function updateQoderModelsCache(
       name,
       email,
     });
+    logCosyRequest("GET", modelListURL, headers);
 
     const response = await fetch(modelListURL, {
       method: "GET",
@@ -430,6 +433,7 @@ export async function updateQoderModelsCache(
         ...headers,
       },
     });
+    await logCosyResponse(modelListURL, response);
 
     if (!response.ok) {
       return;

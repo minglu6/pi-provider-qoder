@@ -73,6 +73,41 @@ Setting a CN PAT without a global PAT also auto-selects CN mode for the `qoder`
 entry, but the recommended explicit China entry is still `/login qoder-cn` and
 `--provider qoder-cn`.
 
+### Enterprise VPC
+
+Set the VPC instance name shown before `.vpc.qoder.com.cn`:
+
+```bash
+export QODER_VPC_INSTANCE=sungrow-of-enterprise
+```
+
+The provider derives the service-specific hosts expected by Qoder VPC:
+
+- `https://<instance>-gateway.vpc.qoder.com.cn`
+- `https://<instance>-openapi.vpc.qoder.com.cn`
+
+`QODER_VPC_ENDPOINT` and the official CLI variable `QODERCN_VPC_ENDPOINT`
+are accepted as aliases. The legacy `QODERCN_CLI_VPC_ENDPOINT` spelling is
+also accepted. Existing `QODER_CN_BASE_URL`,
+`QODER_CN_OPENAPI_URL`, and `QODER_CN_CENTER_URL` overrides remain supported;
+when they contain the tenant dashboard host, the provider normalizes them to
+the corresponding gateway or OpenAPI host.
+
+Important: `<instance>.vpc.qoder.com.cn` is the tenant dashboard host, not an
+API host. Sending PAT exchange or COSY chat there returns `CSRFInvalid`
+because it hits web/session middleware. Always use the derived `-gateway` /
+`-openapi` hosts above.
+
+Use a PAT created by the VPC tenant (for example from
+`https://<instance>.vpc.qoder.com.cn/account/integrations`). A public/global
+PAT exchanged against the tenant OpenAPI host fails with
+`open_access_token not found`. The exchange payload must remain
+`personal_token`; verify PAT provisioning with the tenant administrator.
+
+For safe request diagnostics, set `QODER_COSY_DEBUG=1`. Logs include the URL,
+status, and non-secret COSY signature inputs, but never credentials,
+Authorization, `Cosy-Key`, or machine identifiers.
+
 ## Endpoints
 
 Global:

@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  formatQoderHttpError,
   getQoderBaseUrl,
   getQoderCenterUrl,
   getQoderChatURL,
@@ -17,6 +18,29 @@ import {
   isQoderCNMode,
   toQoderCNFriendlyModel,
 } from "../cosy.js";
+
+const endpointEnvNames = [
+  "QODER_CN_BASE_URL",
+  "QODER_CN_OPENAPI_URL",
+  "QODER_CN_CENTER_URL",
+  "QODER_VPC_INSTANCE",
+  "QODER_VPC_ENDPOINT",
+  "QODERCN_VPC_ENDPOINT",
+  "QODERCN_CLI_VPC_ENDPOINT",
+] as const;
+const originalEndpointEnv = Object.fromEntries(endpointEnvNames.map((name) => [name, process.env[name]]));
+
+beforeEach(() => {
+  for (const name of endpointEnvNames) delete process.env[name];
+});
+
+afterEach(() => {
+  for (const name of endpointEnvNames) {
+    const value = originalEndpointEnv[name];
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
+});
 
 // ── getQoderMode ──────────────────────────────────────────────────────────
 
@@ -86,6 +110,62 @@ describe("getQoderCenterUrl", () => {
 
   it("returns global URL for global mode", () => {
     expect(getQoderCenterUrl("global")).toBe("https://center.qoder.sh");
+  });
+});
+
+describe("Qoder VPC endpoint derivation", () => {
+  it("derives gateway and OpenAPI hosts from an instance name", () => {
+    process.env.QODER_VPC_INSTANCE = "sungrow-of-enterprise";
+
+    expect(getQoderBaseUrl("cn")).toBe("https://sungrow-of-enterprise-gateway.vpc.qoder.com.cn/");
+    expect(getQoderOpenApiUrl("cn")).toBe("https://sungrow-of-enterprise-openapi.vpc.qoder.com.cn");
+    expect(getQoderCenterUrl("cn")).toBe("https://sungrow-of-enterprise-gateway.vpc.qoder.com.cn");
+  });
+
+  it("normalizes the tenant dashboard URL used as a legacy override", () => {
+    const dashboardUrl = "https://sungrow-of-enterprise.vpc.qoder.com.cn/";
+    process.env.QODER_CN_BASE_URL = dashboardUrl;
+
+    expect(getQoderBaseUrl("cn")).toBe("https://sungrow-of-enterprise-gateway.vpc.qoder.com.cn/");
+    expect(getQoderOpenApiUrl("cn")).toBe("https://sungrow-of-enterprise-openapi.vpc.qoder.com.cn");
+    expect(getQoderCenterUrl("cn")).toBe("https://sungrow-of-enterprise-gateway.vpc.qoder.com.cn");
+  });
+
+  it("accepts the official CLI VPC endpoint environment variable", () => {
+    process.env.QODERCN_VPC_ENDPOINT = "sungrow-of-enterprise-openapi.vpc.qoder.com.cn";
+
+    expect(getQoderBaseUrl("cn")).toBe("https://sungrow-of-enterprise-gateway.vpc.qoder.com.cn/");
+    expect(getQoderOpenApiUrl("cn")).toBe("https://sungrow-of-enterprise-openapi.vpc.qoder.com.cn");
+  });
+});
+
+describe("formatQoderHttpError", () => {
+  it("explains CSRFInvalid on the tenant dashboard host", () => {
+    const message = formatQoderHttpError(
+      "pat-exchange",
+      400,
+      "Bad Request",
+      '{"errorCode":"CSRFInvalid","errorMessage":"Invalid or missing CSRF token"}',
+      "https://sungrow-of-enterprise.vpc.qoder.com.cn/api/v1/jobToken/exchange",
+    );
+
+    expect(message).toContain("CSRFInvalid");
+    expect(message).toContain("tenant dashboard host");
+    expect(message).toContain("<instance>-gateway.vpc.qoder.com.cn");
+  });
+
+  it("explains open_access_token not found on the VPC OpenAPI host", () => {
+    const message = formatQoderHttpError(
+      "pat-exchange",
+      400,
+      "Bad Request",
+      '{"errorCode":"BadRequest","errorMessage":"openv1: open_access_token not found"}',
+      "https://sungrow-of-enterprise-openapi.vpc.qoder.com.cn/api/v1/jobToken/exchange",
+    );
+
+    expect(message).toContain("open_access_token not found");
+    expect(message).toContain("tenant-side access record");
+    expect(message).toContain("/account/integrations");
   });
 });
 

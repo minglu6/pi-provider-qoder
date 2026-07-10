@@ -13,12 +13,15 @@ import type {
 import * as PiAi from "@earendil-works/pi-ai";
 import {
   buildAuthHeaders,
+  formatQoderHttpError,
   getMachineId,
   getQoderChatURL,
   getQoderCNDirectModel,
   getQoderMode,
   getQoderUserEmailFallback,
   isQoderCNMode,
+  logCosyRequest,
+  logCosyResponse,
 } from "./cosy.js";
 import { getCachedModelConfig } from "./models.js";
 import { getCachedCredentials } from "./oauth.js";
@@ -227,6 +230,7 @@ export function streamQoder(
         email,
         machineID,
       });
+      logCosyRequest("POST", chatURL, headers);
 
       const modelSource = modelConfig.source || "system";
 
@@ -244,10 +248,11 @@ export function streamQoder(
         body: encodedBytes,
         signal: options?.signal,
       });
+      await logCosyResponse(chatURL, response);
 
       if (!response.ok) {
         const errText = await response.text();
-        throw new Error(`Qoder API request failed: ${response.status} ${response.statusText}. Response: ${errText}`);
+        throw new Error(formatQoderHttpError("api", response.status, response.statusText, errText, chatURL));
       }
 
       const reader = response.body?.getReader();
