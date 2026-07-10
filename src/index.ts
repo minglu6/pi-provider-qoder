@@ -71,9 +71,12 @@ export default function (pi: ExtensionAPI) {
         const accessToken = await ctx.modelRegistry.getApiKeyForProvider(providerID);
         if (!accessToken || !isCacheStale(mode)) continue;
         const creds = getCachedCredentials(accessToken, providerID);
-        const userID = creds?.userID || "qoder-user";
-        const name = creds?.name || (isQoderCNMode(mode) ? "Qoder CN User" : "Qoder User");
-        const email = creds?.email || getQoderUserEmailFallback(mode);
+        // Skip model cache refresh if we cannot resolve a real userID.
+        // Calling the Qoder gateway with a placeholder userID causes HTTP 500.
+        if (!creds?.userID) continue;
+        const userID = creds.userID;
+        const name = creds.name || (isQoderCNMode(mode) ? "Qoder CN User" : "Qoder User");
+        const email = creds.email || getQoderUserEmailFallback(mode);
         await updateQoderModelsCache(accessToken, userID, name, email, mode);
       } catch {
         // Best-effort: fall back to the existing cache / static models.
