@@ -66,16 +66,73 @@ export function getQoderCNPat(): string {
   return process.env.QODERCN_PERSONAL_ACCESS_TOKEN || process.env.QODERCN_PAT || "";
 }
 
-export function getQoderBaseUrl(mode?: string): string {
-  return isQoderCNMode(mode) ? "https://gateway.qoder.com.cn/" : "https://api3.qoder.sh/";
+const QoderVPCDomain = "vpc.qoder.com.cn";
+
+function parseQoderVPCInstance(value?: string): string | undefined {
+  if (!value?.trim()) return undefined;
+
+  let candidate = value.trim().toLowerCase();
+  try {
+    candidate = new URL(candidate.includes("://") ? candidate : `https://${candidate}`).hostname;
+  } catch {
+    return undefined;
+  }
+
+  const suffix = `.${QoderVPCDomain}`;
+  if (candidate.endsWith(suffix)) {
+    candidate = candidate.slice(0, -suffix.length);
+    if (candidate.endsWith("-gateway") || candidate.endsWith("-openapi")) {
+      candidate = candidate.slice(0, -8);
+    }
+  } else if (candidate.includes(".")) {
+    return undefined;
+  }
+
+  return /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(candidate) ? candidate : undefined;
 }
 
+function getQoderVPCInstance(endpointOverride?: string): string | undefined {
+  return parseQoderVPCInstance(
+    endpointOverride ||
+      process.env.QODER_VPC_INSTANCE ||
+      process.env.QODER_VPC_ENDPOINT ||
+      process.env.QODERCN_VPC_ENDPOINT ||
+      process.env.QODERCN_CLI_VPC_ENDPOINT ||
+      process.env.QODER_CN_BASE_URL ||
+      process.env.QODER_CN_OPENAPI_URL ||
+      process.env.QODER_CN_CENTER_URL,
+  );
+}
+
+function getQoderVPCServiceUrl(service: "gateway" | "openapi", endpointOverride?: string): string | undefined {
+  const instance = getQoderVPCInstance(endpointOverride);
+  return instance ? `https://${instance}-${service}.${QoderVPCDomain}` : undefined;
+}
+
+export function getQoderBaseUrl(mode?: string): string {
+  if (isQoderCNMode(mode)) {
+    const override = process.env.QODER_CN_BASE_URL;
+    const url = getQoderVPCServiceUrl("gateway", override) || override || "https://gateway.qoder.com.cn/";
+    return url.endsWith("/") ? url : `${url}/`;
+  }
+  return "https://api3.qoder.sh/";
+}
 export function getQoderOpenApiUrl(mode?: string): string {
-  return isQoderCNMode(mode) ? "https://openapi.qoder.com.cn" : "https://openapi.qoder.sh";
+  if (isQoderCNMode(mode)) {
+    const override = process.env.QODER_CN_OPENAPI_URL;
+    const url = getQoderVPCServiceUrl("openapi", override) || override || "https://openapi.qoder.com.cn";
+    return url.replace(/\/+$/, "");
+  }
+  return "https://openapi.qoder.sh";
 }
 
 export function getQoderCenterUrl(mode?: string): string {
-  return isQoderCNMode(mode) ? "https://gateway.qoder.com.cn" : "https://center.qoder.sh";
+  if (isQoderCNMode(mode)) {
+    const override = process.env.QODER_CN_CENTER_URL;
+    const url = getQoderVPCServiceUrl("gateway", override) || override || "https://gateway.qoder.com.cn";
+    return url.replace(/\/+$/, "");
+  }
+  return "https://center.qoder.sh";
 }
 
 export function getQoderModelListURL(mode?: string): string {
@@ -283,4 +340,118 @@ export function buildAuthHeaders(
     "Login-Version": QoderLoginVersion,
     "X-Request-Id": crypto.randomUUID(),
   };
+}
+
+function isCosyDebugEnabled(): boolean {
+  return ["1", "true", "yes", "on"].includes((process.env.QODER_COSY_DEBUG || "").toLowerCase());
+}
+
+export function logCosyRequest(method: string, requestURL: string, headers: Record<string, string>): void {
+  if (!isCosyDebugEnabled()) return;
+
+  console.error(
+    `[qoder:cosy] request ${JSON.stringify({
+      method,
+      url: requestURL,
+      cosyDate: headers["Cosy-Date"],
+      cosySigpath: headers["Cosy-Sigpath"],
+      cosyBodyhash: headers["Cosy-Bodyhash"],
+      cosyBodylength: headers["Cosy-Bodylength"],
+      cosyOrganizationId: headers["Cosy-Organization-Id"],
+      cosyOrganizationTags: headers["Cosy-Organization-Tags"],
+    })}`,
+  );
+}
+
+export async function logCosyResponse(requestURL: string, response: Response): Promise<void> {
+  if (!isCosyDebugEnabled()) return;
+
+  let bodyPreview: string | undefined;
+  if (!response.ok) {
+    try {
+      bodyPreview = (await response.clone().text()).slice(0, 200);
+    } catch {
+      bodyPreview = "<unavailable>";
+    }
+  }
+
+  const responseHeaders: Record<string, string> = {};
+  for (const name of [
+    "date",
+    "server",
+    "via",
+    "x-request-id",
+    "x-cosy-request-id",
+    "x-trace-id",
+    "trace-id",
+    "cf-ray",
+    "x-cache",
+    "x-envoy-upstream-service-time",
+  ]) {
+    const value = response.headers.get(name);
+    if (value !== null) responseHeaders[name] = value;
+  }
+
+  console.error(
+    `[qoder:cosy] response ${JSON.stringify({
+      url: requestURL,
+      status: response.status,
+      statusText: response.statusText,
+      headers: responseHeaders,
+      ...(bodyPreview === undefined ? {} : { bodyPreview }),
+    })}`,
+  );
+}
+
+function isQoderTenantDashboardHost(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  const suffix = `.${QoderVPCDomain}`;
+  if (!host.endsWith(suffix)) return false;
+  const prefix = host.slice(0, -suffix.length);
+  return Boolean(prefix) && !prefix.includes(".") && !prefix.endsWith("-gateway") && !prefix.endsWith("-openapi");
+}
+
+/** Enrich Qoder HTTP failures with VPC/CSRF guidance without leaking secrets. */
+export function formatQoderHttpError(
+  kind: "api" | "pat-exchange",
+  status: number,
+  statusText: string,
+  bodyText: string,
+  requestURL?: string,
+): string {
+  const preview = bodyText.replace(/\s+/g, " ").trim().slice(0, 200);
+  const prefix =
+    kind === "pat-exchange"
+      ? `Qoder PAT exchange failed: ${status} ${statusText}`
+      : `Qoder API request failed: ${status} ${statusText}`;
+  const base = preview ? `${prefix}. Response: ${preview}` : prefix;
+
+  let host = "";
+  if (requestURL) {
+    try {
+      host = new URL(requestURL).hostname.toLowerCase();
+    } catch {
+      host = "";
+    }
+  }
+
+  const hints: string[] = [];
+  if (/CSRFInvalid/i.test(bodyText)) {
+    if (host && isQoderTenantDashboardHost(host)) {
+      hints.push(
+        `Request hit the tenant dashboard host (${host}). Use the derived API hosts instead: https://<instance>-gateway.vpc.qoder.com.cn and https://<instance>-openapi.vpc.qoder.com.cn (set QODER_VPC_INSTANCE=<instance>).`,
+      );
+    } else {
+      hints.push(
+        "CSRFInvalid usually means the request reached web/session middleware instead of the VPC gateway/OpenAPI service. Set QODER_VPC_INSTANCE (or QODERCN_VPC_ENDPOINT) and retry with QODER_COSY_DEBUG=1.",
+      );
+    }
+  }
+  if (/open_access_token not found/i.test(bodyText)) {
+    hints.push(
+      "The VPC OpenAPI host could not resolve a tenant-side access record for this PAT. Create/use a PAT from the VPC tenant dashboard (https://<instance>.vpc.qoder.com.cn/account/integrations).",
+    );
+  }
+
+  return hints.length > 0 ? `${base} Hint: ${hints.join(" ")}` : base;
 }

@@ -1,5 +1,29 @@
-import { describe, expect, it } from "vitest";
-import { decodePatRefresh, encodePatRefresh, isPatRefresh, PAT_REFRESH_PREFIX } from "../pat.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { decodePatRefresh, encodePatRefresh, exchangeJobToken, isPatRefresh, PAT_REFRESH_PREFIX } from "../pat.js";
+
+const endpointEnvNames = [
+  "QODER_CN_BASE_URL",
+  "QODER_CN_OPENAPI_URL",
+  "QODER_CN_CENTER_URL",
+  "QODER_VPC_ENDPOINT",
+  "QODERCN_VPC_ENDPOINT",
+  "QODERCN_CLI_VPC_ENDPOINT",
+  "QODER_VPC_INSTANCE",
+] as const;
+const originalEndpointEnv = Object.fromEntries(endpointEnvNames.map((name) => [name, process.env[name]]));
+
+beforeEach(() => {
+  for (const name of endpointEnvNames) delete process.env[name];
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  for (const name of endpointEnvNames) {
+    const original = originalEndpointEnv[name];
+    if (original === undefined) delete process.env[name];
+    else process.env[name] = original;
+  }
+});
 
 // ── isPatRefresh ──────────────────────────────────────────────────────────
 
@@ -65,5 +89,30 @@ describe("encodePatRefresh / decodePatRefresh roundtrip", () => {
 describe("PAT_REFRESH_PREFIX", () => {
   it('is "pat"', () => {
     expect(PAT_REFRESH_PREFIX).toBe("pat");
+  });
+});
+
+describe("exchangeJobToken", () => {
+  it("matches the official CLI VPC exchange payload", async () => {
+    process.env.QODER_VPC_INSTANCE = "example-tenant";
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          token: "jt-test",
+          refresh_token: "jrt-test",
+          expires_in: 60_000,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await exchangeJobToken("pt-test", "cn");
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("https://example-tenant-openapi.vpc.qoder.com.cn/api/v1/jobToken/exchange");
+    expect(JSON.parse(init.body as string)).toEqual({ personal_token: "pt-test" });
+    expect(JSON.parse(init.body as string)).not.toHaveProperty("open_access_token");
   });
 });
