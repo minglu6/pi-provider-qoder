@@ -16,19 +16,74 @@ A [pi](https://shittycodingagent.ai/) provider extension that connects pi to the
 
 ## Quick start
 
-Install the provider:
+### Install (OMP / this VPC branch)
+
+The npm package name `pi-provider-qoder` on the public registry is the **upstream**
+package. To get the VPC / OMP fixes from this repository, install the **`vpc`**
+branch from GitHub instead of `npm:pi-provider-qoder`.
+
+Three supported ways (pick one):
+
+#### 1) OMP git install — recommended for most users
+
+```bash
+# If an older copy is already installed, remove it first:
+omp plugin uninstall pi-provider-qoder
+
+omp plugin install github:minglu6/pi-provider-qoder#vpc
+# equivalent:
+# omp plugin install git+https://github.com/minglu6/pi-provider-qoder.git#vpc
+```
+
+Then **fully restart OMP** (quit all windows; do not only open a new chat).
+Extension entry is read at process start.
+
+Verify:
+
+```bash
+omp plugin list
+omp plugin doctor
+```
+
+You should see `pi-provider-qoder` enabled, with `pi.extensions` pointing at
+`./src/index.ts`.
+
+#### 2) Local clone + link — recommended for contributors / Windows debugging
+
+```bash
+git clone --branch vpc --single-branch https://github.com/minglu6/pi-provider-qoder.git
+cd pi-provider-qoder
+npm install
+omp plugin link "$(pwd)"
+```
+
+Use this when you want to pull updates yourself, keep a local checkout, or
+debug loading issues. After `git pull`, restart OMP (and rebuild with
+`npm run build` if you rely on `dist/`).
+
+#### 3) npm registry — only if you intentionally want upstream
 
 ```bash
 pi install npm:pi-provider-qoder
-```
-
-Or install it globally with npm:
-
-```bash
+# or
 npm install -g pi-provider-qoder
 ```
 
-Then log in from pi.
+This installs the **published upstream** package. It may **not** include this
+branch's VPC endpoint helpers, jrt-only refresh, or the Windows/OMP source
+entry. Prefer method 1 or 2 unless you know you want upstream.
+
+> This fork is not published as a separate npm package name yet. For sharing
+> with others, send them method 1 (or method 2).
+
+### Extension entry (Windows / OMP)
+
+`package.json` → `pi.extensions` is `./src/index.ts` (same pattern as some other
+OMP-linked providers). OMP loads the TypeScript source entry directly; `npm run
+build` still produces `dist/index.js` for compatibility, but local OMP installs
+should not depend on parsing the bundled `dist` file.
+
+### Log in
 
 Global / international edition:
 
@@ -36,11 +91,15 @@ Global / international edition:
 /login qoder
 ```
 
-China edition:
+China / VPC edition (recommended for CN and enterprise VPC):
 
 ```text
 /login qoder-cn
 ```
+
+In CN/VPC environments `/provider` may show **two** Qoder rows from the same
+plugin: `Qoder CN (PAT)` (`qoder-cn`) and `Qoder (CN mode / PAT)` (`qoder`).
+Use the logged-in **`qoder-cn`** entry for VPC.
 
 ### Personal Access Token (PAT)
 
@@ -59,8 +118,10 @@ Qoder China:
 - Or set `QODERCN_PERSONAL_ACCESS_TOKEN` (or `QODERCN_PAT`) before starting pi.
 - `QODER_API_KEY` is accepted as a CN PAT alias **only** when the value starts with `pt-`.
 
-> The exchanged job token is short-lived; the provider transparently re-exchanges
-> the stored PAT when it expires.
+> The exchanged job token (`jt-...`) is short-lived. After login the provider
+> persists a **job refresh token** (`jrt-...`) only — it does **not** store the
+> plaintext PAT. When the job token expires, the provider calls
+> `POST /api/v1/jobToken/refresh`. If refresh fails, log in again with a PAT.
 
 ### Region environment variables
 
@@ -114,6 +175,7 @@ Authorization, `Cosy-Key`, or machine identifiers.
 Global:
 
 - PAT exchange: `https://openapi.qoder.sh/api/v1/jobToken/exchange`
+- Job-token refresh: `https://openapi.qoder.sh/api/v1/jobToken/refresh`
 - User info: `https://openapi.qoder.sh/api/v1/userinfo`
 - Usage: `https://openapi.qoder.sh/api/v2/quota/usage`
 - Model / chat gateway: `https://api3.qoder.sh/algo/api/v2/...`
@@ -121,9 +183,14 @@ Global:
 China:
 
 - PAT exchange: `https://openapi.qoder.com.cn/api/v1/jobToken/exchange`
+- Job-token refresh: `https://openapi.qoder.com.cn/api/v1/jobToken/refresh`
 - User info: `https://openapi.qoder.com.cn/api/v1/userinfo`
 - Usage: `https://openapi.qoder.com.cn/api/v2/quota/usage`
 - Model / chat gateway: `https://gateway.qoder.com.cn/algo/api/v2/...`
+
+Enterprise VPC (when `QODER_VPC_INSTANCE=<instance>` is set) uses the derived
+`-openapi` / `-gateway` hosts under `*.vpc.qoder.com.cn` instead of the public
+China hosts above.
 
 ## Models
 

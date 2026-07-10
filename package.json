@@ -55,10 +55,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/simonsmh/pi-provider-qoder.git"
+    "url": "git+https://github.com/minglu6/pi-provider-qoder.git"
   },
   "bugs": {
-    "url": "https://github.com/simonsmh/pi-provider-qoder/issues"
+    "url": "https://github.com/minglu6/pi-provider-qoder/issues"
   },
-  "homepage": "https://github.com/simonsmh/pi-provider-qoder#readme"
+  "homepage": "https://github.com/minglu6/pi-provider-qoder/tree/vpc#readme"
 }
