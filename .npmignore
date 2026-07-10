@@ -1,0 +1,4 @@
+# Keep the published tarball aligned with the runtime entry.
+src/__tests__/
+scripts/
+*.tgz
