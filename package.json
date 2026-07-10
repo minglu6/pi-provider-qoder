@@ -16,10 +16,21 @@
   ],
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "src/cosy.ts",
+    "src/index.ts",
+    "src/login.ts",
+    "src/models.ts",
+    "src/oauth.ts",
+    "src/pat.ts",
+    "src/qoder-encoding.ts",
+    "src/stream.ts",
+    "src/thinking-parser.ts",
+    "src/transform.ts",
+    "src/usage.ts"
   ],
   "scripts": {
-    "build": "./node_modules/esbuild/bin/esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --external:@earendil-works/pi-ai --external:@earendil-works/pi-coding-agent",
+    "build": "node scripts/build.mjs",
     "check": "node node_modules/typescript/bin/tsc --noEmit",
     "lint": "node node_modules/@biomejs/biome/bin/biome check .",
     "lint:fix": "node node_modules/@biomejs/biome/bin/biome check --write .",
@@ -31,7 +42,7 @@
   },
   "pi": {
     "extensions": [
-      "./dist/index.js"
+      "./src/index.ts"
     ]
   },
   "devDependencies": {
@@ -44,10 +55,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/simonsmh/pi-provider-qoder.git"
+    "url": "git+https://github.com/minglu6/pi-provider-qoder.git"
   },
   "bugs": {
-    "url": "https://github.com/simonsmh/pi-provider-qoder/issues"
+    "url": "https://github.com/minglu6/pi-provider-qoder/issues"
   },
-  "homepage": "https://github.com/simonsmh/pi-provider-qoder#readme"
+  "homepage": "https://github.com/minglu6/pi-provider-qoder/tree/vpc#readme"
 }

@@ -24,7 +24,7 @@ import {
   logCosyResponse,
 } from "./cosy.js";
 import { getCachedModelConfig } from "./models.js";
-import { getCachedCredentials } from "./oauth.js";
+import { resolveQoderIdentity } from "./oauth.js";
 import { qoderEncodeBody } from "./qoder-encoding.js";
 import { ThinkingTagParser } from "./thinking-parser.js";
 import { transformMessagesForQoder, transformTools } from "./transform.js";
@@ -111,17 +111,19 @@ export function streamQoder(
       if (!accessToken) {
         throw new Error(
           isQoderCNMode(providerMode)
-            ? "Qoder CN credentials not set. Run /login qoder-cn or set QODERCN_PERSONAL_ACCESS_TOKEN."
+            ? "Qoder CN credentials not set. Run /login qoder-cn or set QODERCN_PERSONAL_ACCESS_TOKEN / QODERCN_PAT (or QODER_API_KEY=pt-...)."
             : "Qoder credentials not set. Run /login qoder or set QODER_PERSONAL_ACCESS_TOKEN.",
         );
       }
 
-      // Resolve user details from cached credentials
-      const cachedCreds = getCachedCredentials(accessToken, model.provider);
-      const userID = cachedCreds?.userID || "qoder-user";
-      const name = cachedCreds?.name || (isQoderCNMode(providerMode) ? "Qoder CN User" : "Qoder User");
-      const email = cachedCreds?.email || getQoderUserEmailFallback(providerMode);
-      const machineID = cachedCreds?.machineID || getMachineId();
+      // Resolve identity: auth.json fast path → in-process cache → /userinfo(access).
+      // Cold start only has options.apiKey (access); do NOT decode refresh here.
+      // Never invent a placeholder userID — the gateway returns opaque HTTP 500.
+      const identity = await resolveQoderIdentity(accessToken, model.provider, providerMode);
+      const userID = identity.userID;
+      const name = identity.name || (isQoderCNMode(providerMode) ? "Qoder CN User" : "Qoder User");
+      const email = identity.email || getQoderUserEmailFallback(providerMode);
+      const machineID = identity.machineID || getMachineId();
 
       const qoderModel = isQoderCNMode(providerMode) ? getQoderCNDirectModel(model.id) : model.id;
       const modelConfig = getCachedModelConfig(qoderModel, providerMode) || {

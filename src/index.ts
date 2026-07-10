@@ -8,7 +8,7 @@ import {
   toQoderCNFriendlyModel,
 } from "./cosy.js";
 import { getCachedModels, isCacheStale, staticCnModels, staticModels, updateQoderModelsCache } from "./models.js";
-import { getCachedCredentials, loginQoder, loginQoderCN, refreshQoderToken, refreshQoderTokenCN } from "./oauth.js";
+import { loginQoder, loginQoderCN, refreshQoderToken, refreshQoderTokenCN, resolveQoderIdentity } from "./oauth.js";
 import { streamQoder } from "./stream.js";
 import { fetchQoderUsage, fetchQoderUsageCN } from "./usage.js";
 
@@ -32,9 +32,17 @@ function modelsForProvider(mode: string, providerID: string): Model<Api>[] {
   }) as unknown as Model<Api>[];
 }
 
+function oauthDisplayName(providerID: string, mode: string): string {
+  // Always distinguish by providerID. When getQoderMode() is "cn", both
+  // `qoder` and `qoder-cn` would otherwise show as "Qoder CN (PAT)" in /provider.
+  if (providerID === "qoder-cn") return "Qoder CN (PAT)";
+  if (isQoderCNMode(mode)) return "Qoder (CN mode / PAT)";
+  return "Qoder (Browser OAuth / PAT)";
+}
+
 function createQoderOAuth(providerID: string, mode: string): OAuthConfigWithUsage {
   return {
-    name: isQoderCNMode(mode) ? "Qoder CN (PAT)" : "Qoder (Browser OAuth / PAT)",
+    name: oauthDisplayName(providerID, mode),
     login: isQoderCNMode(mode) ? loginQoderCN : loginQoder,
     refreshToken: isQoderCNMode(mode) ? refreshQoderTokenCN : refreshQoderToken,
     getApiKey: (cred: OAuthCredentials) => cred.access,
@@ -70,10 +78,12 @@ export default function (pi: ExtensionAPI) {
       try {
         const accessToken = await ctx.modelRegistry.getApiKeyForProvider(providerID);
         if (!accessToken || !isCacheStale(mode)) continue;
-        const creds = getCachedCredentials(accessToken, providerID);
-        const userID = creds?.userID || "qoder-user";
-        const name = creds?.name || (isQoderCNMode(mode) ? "Qoder CN User" : "Qoder User");
-        const email = creds?.email || getQoderUserEmailFallback(mode);
+        // Prefer auth.json, else /userinfo(access). Never use a placeholder userID.
+        const creds = await resolveQoderIdentity(accessToken, providerID, mode);
+        if (!creds?.userID) continue;
+        const userID = creds.userID;
+        const name = creds.name || (isQoderCNMode(mode) ? "Qoder CN User" : "Qoder User");
+        const email = creds.email || getQoderUserEmailFallback(mode);
         await updateQoderModelsCache(accessToken, userID, name, email, mode);
       } catch {
         // Best-effort: fall back to the existing cache / static models.

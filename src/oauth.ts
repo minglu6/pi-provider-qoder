@@ -1,13 +1,36 @@
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
-import { getMachineId, getQoderCNPat, getQoderMode, getQoderRefreshURL, isQoderCNMode } from "./cosy.js";
+import {
+  getMachineId,
+  getQoderCNPat,
+  getQoderMode,
+  getQoderRefreshURL,
+  getQoderUserEmailFallback,
+  isQoderCNMode,
+} from "./cosy.js";
 import { interactiveLogin } from "./login.js";
 import { updateQoderModelsCache } from "./models.js";
-import { credentialsFromPat, decodePatRefresh, isPatRefresh } from "./pat.js";
+import {
+  credentialsFromJobTokens,
+  credentialsFromPat,
+  decodePatRefresh,
+  fetchUserInfo,
+  isPatRefresh,
+  refreshJobToken,
+} from "./pat.js";
 
 export interface QoderCredentials extends OAuthCredentials {
+  userID: string;
+  email: string;
+  name: string;
+  machineID: string;
+}
+
+/** Identity-only fields kept in the process-local cache (never access/refresh/PAT). */
+export interface QoderIdentity {
   userID: string;
   email: string;
   name: string;
@@ -17,19 +40,79 @@ export interface QoderCredentials extends OAuthCredentials {
 const AUTH_FILE = join(homedir(), ".pi", "agent", "auth.json");
 
 /**
+ * Process-local identity cache.
+ * Key: providerID + SHA-256(accessToken). Value: identity fields only.
+ * Never stores access/refresh (refresh holds jrt + identity only).
+ */
+const identityMemoryCache = new Map<string, QoderIdentity>();
+
+function hashAccessToken(accessToken: string): string {
+  return createHash("sha256").update(accessToken).digest("hex");
+}
+
+function identityCacheKey(providerID: string, accessToken: string): string {
+  return `${providerID}\0${hashAccessToken(accessToken)}`;
+}
+
+function clearProviderIdentityCache(providerID: string): void {
+  const prefix = `${providerID}\0`;
+  for (const key of [...identityMemoryCache.keys()]) {
+    if (key.startsWith(prefix)) identityMemoryCache.delete(key);
+  }
+}
+
+function toQoderIdentity(
+  creds: Pick<QoderCredentials, "userID" | "email" | "name" | "machineID">,
+): QoderIdentity {
+  return {
+    userID: creds.userID,
+    email: creds.email || "",
+    name: creds.name || "",
+    machineID: creds.machineID || getMachineId(),
+  };
+}
+
+/**
+ * Seed / replace the in-process identity cache after login, refresh, or resolve.
+ * Stores identity fields only; clears prior entries for this provider so stale
+ * access-token keys (and any previously cached secrets) cannot linger.
+ */
+export function rememberQoderIdentity(
+  providerID: string,
+  creds: Pick<QoderCredentials, "access" | "userID" | "email" | "name" | "machineID">,
+): void {
+  if (!creds?.access || !creds?.userID) return;
+  clearProviderIdentityCache(providerID);
+  identityMemoryCache.set(identityCacheKey(providerID, creds.access), toQoderIdentity(creds));
+}
+
+/** Test helper: clear process-local identity cache. */
+export function clearQoderIdentityMemoryCache(): void {
+  identityMemoryCache.clear();
+}
+
+/** Test helper: inspect cached identity values (must never include access/refresh). */
+export function peekQoderIdentityMemoryCache(): QoderIdentity[] {
+  return [...identityMemoryCache.values()].map((v) => ({ ...v }));
+}
+
+/**
  * Read the Qoder identity (userID/email/name/machineID) from pi's own auth
- * store. pi persists the full OAuthCredentials there on login/refresh and keeps
- * it up to date, so there is no need to maintain a separate credentials cache.
+ * store. This is a sync fast path only.
  *
  * Note: the auth.json path/shape is a pi internal convention, not a public API.
- * This is best-effort and falls back to null so callers can use placeholders.
+ * Do not treat rewriting full access/refresh into auth.json as the primary fix —
+ * that races the host credential store.
  */
-export function getCachedCredentials(_accessToken: string, providerID = "qoder"): QoderCredentials | null {
+export function getCachedCredentials(accessToken: string, providerID = "qoder"): QoderCredentials | null {
   if (existsSync(AUTH_FILE)) {
     try {
       const auth = JSON.parse(readFileSync(AUTH_FILE, "utf-8"));
       const creds = auth?.[providerID] || (providerID === "qoder" ? auth?.qoder : null);
-      if (creds?.userID) {
+      // Only trust auth.json when it belongs to THIS access token.
+      // Otherwise OMP may have rotated to a new account/token while auth.json
+      // still holds a stale userID — mixing them causes opaque gateway 500s.
+      if (creds?.userID && typeof creds.access === "string" && creds.access === accessToken) {
         return creds as QoderCredentials;
       }
     } catch {}
@@ -37,17 +120,94 @@ export function getCachedCredentials(_accessToken: string, providerID = "qoder")
   return null;
 }
 
+/**
+ * Resolve Qoder identity for chat/COSY requests.
+ *
+ * Cold-start stream only has the access token (options.apiKey) — not refresh —
+ * so recovery must not depend on decoding the DB refresh field.
+ *
+ * Order:
+ * 1. auth.json fast path (sync) — only when stored access === accessToken
+ * 2. process-local memory cache keyed by (providerID, sha256(accessToken)); identity-only values
+ * 3. /userinfo with the access token
+ *
+ * Never invents a placeholder userID. Stale auth.json (old userID + new access)
+ * must miss the fast path and re-resolve via /userinfo.
+ */
+export async function resolveQoderIdentity(
+  accessToken: string,
+  providerID = "qoder",
+  mode?: string,
+): Promise<QoderCredentials> {
+  const resolvedMode = mode ?? (providerID === "qoder-cn" ? "cn" : getQoderMode());
+  const providerLabel = isQoderCNMode(resolvedMode) ? "Qoder CN" : "Qoder";
+
+  const fromFile = getCachedCredentials(accessToken, providerID);
+  if (fromFile?.userID) {
+    const identity = toQoderIdentity({
+      userID: fromFile.userID,
+      email: fromFile.email || getQoderUserEmailFallback(resolvedMode),
+      name: fromFile.name || (isQoderCNMode(resolvedMode) ? "Qoder CN User" : "Qoder User"),
+      machineID: fromFile.machineID || getMachineId(),
+    });
+    rememberQoderIdentity(providerID, { access: accessToken, ...identity });
+    return {
+      access: accessToken,
+      refresh: "",
+      expires: 0,
+      ...identity,
+    };
+  }
+
+  const cached = identityMemoryCache.get(identityCacheKey(providerID, accessToken));
+  if (cached?.userID) {
+    return {
+      access: accessToken,
+      refresh: "",
+      expires: 0,
+      ...cached,
+    };
+  }
+
+  const info = await fetchUserInfo(accessToken, resolvedMode);
+  if (!info.userID) {
+    throw new Error(
+      `${providerLabel} identity unavailable: ~/.pi/agent/auth.json has no userID and /userinfo did not return one. ` +
+        `Re-login with "/login ${isQoderCNMode(resolvedMode) ? "qoder-cn" : "qoder"}" ` +
+        `(VPC: ensure QODER_VPC_INSTANCE is set; do not use a placeholder userID).`,
+    );
+  }
+
+  const identity: QoderIdentity = {
+    userID: info.userID,
+    email: info.email || getQoderUserEmailFallback(resolvedMode),
+    name: info.name || (isQoderCNMode(resolvedMode) ? "Qoder CN User" : "Qoder User"),
+    machineID: getMachineId(),
+  };
+  rememberQoderIdentity(providerID, { access: accessToken, ...identity });
+  return {
+    access: accessToken,
+    refresh: "",
+    expires: 0,
+    ...identity,
+  };
+}
+
+function providerIDForMode(mode: string): string {
+  return isQoderCNMode(mode) ? "qoder-cn" : "qoder";
+}
+
 async function loginQoderForMode(callbacks: OAuthLoginCallbacks, mode: string): Promise<OAuthCredentials> {
   // 1. Try environment variables first (PAT). A PAT (pt-...) must be exchanged
   //    for a short-lived job token before it can be used — credentialsFromPat
-  //    handles the exchange + identity resolution.
+  //    handles the exchange + identity resolution (and fails if userID is empty).
   const pat = isQoderCNMode(mode) ? getQoderCNPat() : process.env.QODER_PERSONAL_ACCESS_TOKEN || process.env.QODER_PAT;
   if (pat) {
     try {
       const creds = await credentialsFromPat(pat, mode);
       const qCreds = creds as QoderCredentials;
-      // pi persists these credentials in auth.json itself; no separate cache needed.
-      // Cache models in background
+      rememberQoderIdentity(providerIDForMode(mode), qCreds);
+      // Host persists oauth credentials; we only keep identity in-process.
       updateQoderModelsCache(qCreds.access, qCreds.userID, qCreds.name, qCreds.email, mode).catch(() => {});
       return creds;
     } catch {
@@ -58,10 +218,12 @@ async function loginQoderForMode(callbacks: OAuthLoginCallbacks, mode: string): 
   // 2. Interactive login (CN only supports PAT prompt here; global supports device flow fallback)
   const creds = await interactiveLogin(callbacks, mode);
 
-  // Cache models in background. pi persists the credentials in auth.json itself.
   try {
     const qCreds = creds as QoderCredentials;
-    updateQoderModelsCache(qCreds.access, qCreds.userID, qCreds.name, qCreds.email, mode).catch(() => {});
+    if (qCreds.userID) {
+      rememberQoderIdentity(providerIDForMode(mode), qCreds);
+      updateQoderModelsCache(qCreds.access, qCreds.userID, qCreds.name, qCreds.email, mode).catch(() => {});
+    }
   } catch {}
 
   return creds;
@@ -84,23 +246,78 @@ export async function refreshQoderTokenCN(credentials: OAuthCredentials): Promis
 }
 
 async function refreshQoderTokenForMode(credentials: OAuthCredentials, mode: string): Promise<OAuthCredentials> {
-  // PAT-based credentials: re-exchange the stored PAT for a fresh job token.
+  // Job-token credentials: refresh via jrt. Never re-persist a plaintext PAT.
   if (isPatRefresh(credentials.refresh)) {
-    const { pat } = decodePatRefresh(credentials.refresh);
-    if (pat) {
-      try {
-        const refreshed = await credentialsFromPat(pat, mode);
-        const qCreds = refreshed as QoderCredentials;
+    const decoded = decodePatRefresh(credentials.refresh);
+    const prev = credentials as Partial<QoderCredentials>;
+    const userID = decoded.userID || prev.userID || "";
+    const machineID = decoded.machineID || prev.machineID || getMachineId();
+    const email = prev.email || "";
+    const name = prev.name || "";
+    const providerLabel = isQoderCNMode(mode) ? "Qoder CN" : "Qoder";
+
+    const finalize = (refreshed: OAuthCredentials): OAuthCredentials => {
+      if (typeof refreshed.refresh === "string") {
+        const parts = refreshed.refresh.split("|");
+        if (parts.some((part) => part.startsWith("pt-") || (decoded.pat && part === decoded.pat))) {
+          throw new Error(`${providerLabel} refresh refused to persist a plaintext PAT in refresh`);
+        }
+      }
+      const qCreds = refreshed as QoderCredentials;
+      if (qCreds.userID) {
+        rememberQoderIdentity(providerIDForMode(mode), qCreds);
         updateQoderModelsCache(qCreds.access, qCreds.userID, qCreds.name, qCreds.email, mode).catch(() => {});
-        return refreshed;
+      }
+      return refreshed;
+    };
+
+    // 1) Preferred: server jrt refresh.
+    if (decoded.jobRefreshToken) {
+      try {
+        const exchange = await refreshJobToken(decoded.jobRefreshToken, mode);
+        return finalize(
+          credentialsFromJobTokens(
+            exchange,
+            {
+              userID: userID || (credentials as QoderCredentials).userID,
+              email,
+              name,
+              machineID,
+            },
+            mode,
+          ),
+        );
       } catch {
-        // Fall through to validity extension below.
+        // Fall through to one-shot env PAT / legacy migrate.
       }
     }
-    return {
-      ...credentials,
-      expires: Date.now() + 60 * 60 * 1000, // extend 1 hour to retry later
-    };
+
+    // 2) One-shot env PAT (not from persisted refresh).
+    const envPat = isQoderCNMode(mode)
+      ? getQoderCNPat()
+      : process.env.QODER_PERSONAL_ACCESS_TOKEN || process.env.QODER_PAT || "";
+    if (envPat) {
+      try {
+        return finalize(await credentialsFromPat(envPat, mode));
+      } catch {
+        // Fall through.
+      }
+    }
+
+    // 3) Legacy migrate: if an old refresh still embeds a PAT, use it once to
+    //    obtain jrt-only credentials — then never write the PAT back.
+    if (decoded.legacyEmbeddedPat && decoded.pat) {
+      try {
+        return finalize(await credentialsFromPat(decoded.pat, mode));
+      } catch {
+        // Fall through to hard failure.
+      }
+    }
+
+    throw new Error(
+      `${providerLabel} job token refresh failed. Re-login with "/login ${isQoderCNMode(mode) ? "qoder-cn" : "qoder"}". ` +
+        `PAT is no longer stored in refresh; set a PAT env var only for one-shot login, or paste it interactively.`,
+    );
   }
 
   const parts = credentials.refresh.split("|");
@@ -152,11 +369,12 @@ async function refreshQoderTokenForMode(credentials: OAuthCredentials, mode: str
         email: prevEmail,
         name: prevName,
         machineID,
-      };
+      } as QoderCredentials;
 
-      // pi persists the refreshed credentials in auth.json itself.
-      // Cache models in background
-      updateQoderModelsCache(newAccess, userID, prevName, prevEmail, mode).catch(() => {});
+      if (userID) {
+        rememberQoderIdentity(providerIDForMode(mode), refreshed);
+        updateQoderModelsCache(newAccess, userID, prevName, prevEmail, mode).catch(() => {});
+      }
 
       return refreshed;
     }

@@ -62,8 +62,20 @@ export function isQoderCNMode(modeOverride?: string): boolean {
   return getQoderMode(modeOverride) === "cn";
 }
 
+/** True when value looks like a Qoder PAT (pt-...), not a job token / opaque key. */
+export function isQoderPatValue(value?: string): boolean {
+  return Boolean(value?.trim().startsWith("pt-"));
+}
+
+/**
+ * Resolve a Qoder CN PAT from the environment.
+ * Accepts QODER_API_KEY only when it is a PAT (`pt-...`) — never treat jt-/opaque keys as PATs.
+ */
 export function getQoderCNPat(): string {
-  return process.env.QODERCN_PERSONAL_ACCESS_TOKEN || process.env.QODERCN_PAT || "";
+  const dedicated = process.env.QODERCN_PERSONAL_ACCESS_TOKEN || process.env.QODERCN_PAT || "";
+  if (dedicated.trim()) return dedicated.trim();
+  const apiKey = process.env.QODER_API_KEY || "";
+  return isQoderPatValue(apiKey) ? apiKey.trim() : "";
 }
 
 const QoderVPCDomain = "vpc.qoder.com.cn";
@@ -147,6 +159,10 @@ export function getQoderExchangeURL(mode?: string): string {
   return `${getQoderOpenApiUrl(mode)}/api/v1/jobToken/exchange`;
 }
 
+export function getQoderJobTokenRefreshURL(mode?: string): string {
+  return `${getQoderOpenApiUrl(mode)}/api/v1/jobToken/refresh`;
+}
+
 export function getQoderUserInfoURL(mode?: string): string {
   return `${getQoderOpenApiUrl(mode)}/api/v1/userinfo`;
 }
@@ -217,8 +233,19 @@ export function toQoderCNFriendlyModel<T extends { id: string; name: string }>(m
   };
 }
 
+/** Public or VPC tenant dashboard origin (no trailing slash). */
 export function getQoderManageUrl(mode?: string): string {
-  return isQoderCNMode(mode) ? "https://qoder.com.cn" : "https://qoder.com";
+  if (isQoderCNMode(mode)) {
+    const instance = getQoderVPCInstance();
+    if (instance) return `https://${instance}.${QoderVPCDomain}`;
+    return "https://qoder.com.cn";
+  }
+  return "https://qoder.com";
+}
+
+/** Where users create/copy a PAT (public CN or VPC tenant integrations page). */
+export function getQoderIntegrationsUrl(mode?: string): string {
+  return `${getQoderManageUrl(mode)}/account/integrations`;
 }
 
 export function getQoderUserEmailFallback(mode?: string): string {

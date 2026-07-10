@@ -6,7 +6,10 @@ import {
   getQoderChatURL,
   getQoderCNDirectModel,
   getQoderCNFriendlyModelInfo,
+  getQoderCNPat,
   getQoderExchangeURL,
+  getQoderJobTokenRefreshURL,
+  getQoderIntegrationsUrl,
   getQoderManageUrl,
   getQoderMode,
   getQoderModelListURL,
@@ -16,6 +19,7 @@ import {
   getQoderUserEmailFallback,
   getQoderUserInfoURL,
   isQoderCNMode,
+  isQoderPatValue,
   toQoderCNFriendlyModel,
 } from "../cosy.js";
 
@@ -27,6 +31,15 @@ const endpointEnvNames = [
   "QODER_VPC_ENDPOINT",
   "QODERCN_VPC_ENDPOINT",
   "QODERCN_CLI_VPC_ENDPOINT",
+  // PAT env vars force CN mode in getQoderMode(); isolate tests from host env.
+  "QODERCN_PERSONAL_ACCESS_TOKEN",
+  "QODERCN_PAT",
+  "QODER_PERSONAL_ACCESS_TOKEN",
+  "QODER_PAT",
+  "QODER_API_KEY",
+  "QODER_REGION",
+  "QODER_BACKEND",
+  "QODER_MODE",
 ] as const;
 const originalEndpointEnv = Object.fromEntries(endpointEnvNames.map((name) => [name, process.env[name]]));
 
@@ -198,6 +211,19 @@ describe("getQoderExchangeURL", () => {
   });
 });
 
+describe("getQoderJobTokenRefreshURL", () => {
+  it("constructs correct CN URL", () => {
+    expect(getQoderJobTokenRefreshURL("cn")).toBe("https://openapi.qoder.com.cn/api/v1/jobToken/refresh");
+  });
+
+  it("constructs VPC URL when instance is set", () => {
+    process.env.QODER_VPC_INSTANCE = "sungrow-of-enterprise";
+    expect(getQoderJobTokenRefreshURL("cn")).toBe(
+      "https://sungrow-of-enterprise-openapi.vpc.qoder.com.cn/api/v1/jobToken/refresh",
+    );
+  });
+});
+
 describe("getQoderUserInfoURL", () => {
   it("constructs correct URL", () => {
     expect(getQoderUserInfoURL("global")).toBe("https://openapi.qoder.sh/api/v1/userinfo");
@@ -227,6 +253,44 @@ describe("getQoderManageUrl", () => {
 
   it("returns global URL", () => {
     expect(getQoderManageUrl("global")).toBe("https://qoder.com");
+  });
+
+  it("returns VPC tenant dashboard when QODER_VPC_INSTANCE is set", () => {
+    process.env.QODER_VPC_INSTANCE = "sungrow-of-enterprise";
+    expect(getQoderManageUrl("cn")).toBe("https://sungrow-of-enterprise.vpc.qoder.com.cn");
+  });
+});
+
+describe("getQoderIntegrationsUrl", () => {
+  it("points at public CN integrations by default", () => {
+    expect(getQoderIntegrationsUrl("cn")).toBe("https://qoder.com.cn/account/integrations");
+  });
+
+  it("points at VPC tenant integrations when instance is set", () => {
+    process.env.QODER_VPC_INSTANCE = "sungrow-of-enterprise";
+    expect(getQoderIntegrationsUrl("cn")).toBe(
+      "https://sungrow-of-enterprise.vpc.qoder.com.cn/account/integrations",
+    );
+  });
+});
+
+describe("getQoderCNPat / isQoderPatValue", () => {
+  it("prefers dedicated CN PAT env vars", () => {
+    process.env.QODERCN_PAT = "pt-dedicated";
+    process.env.QODER_API_KEY = "pt-alias";
+    expect(getQoderCNPat()).toBe("pt-dedicated");
+  });
+
+  it("accepts QODER_API_KEY only when it starts with pt-", () => {
+    process.env.QODER_API_KEY = "pt-from-api-key";
+    expect(isQoderPatValue(process.env.QODER_API_KEY)).toBe(true);
+    expect(getQoderCNPat()).toBe("pt-from-api-key");
+  });
+
+  it("ignores QODER_API_KEY when it is not a PAT", () => {
+    process.env.QODER_API_KEY = "jt-not-a-pat";
+    expect(isQoderPatValue(process.env.QODER_API_KEY)).toBe(false);
+    expect(getQoderCNPat()).toBe("");
   });
 });
 
