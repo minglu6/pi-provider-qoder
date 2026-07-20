@@ -1,6 +1,8 @@
-# pi-provider-qoder
+# pi-qoder-provider
 
 A [pi](https://shittycodingagent.ai/) provider extension that connects pi to the **Qoder API**, exposing Qoder Global and Qoder China models through provider surfaces.
+
+Published on npm as `pi-qoder-provider` (GitHub repo remains `minglu6/pi-provider-qoder`).
 
 ## Features
 
@@ -18,13 +20,16 @@ A [pi](https://shittycodingagent.ai/) provider extension that connects pi to the
 
 ### Install
 
-#### 1. OMP git install (recommended)
+#### 1. npm registry (recommended)
 
 ```bash
-# Remove older copy if present
+# Remove older copies if present
+omp plugin uninstall pi-qoder-provider
 omp plugin uninstall pi-provider-qoder
 
-omp plugin install github:minglu6/pi-provider-qoder
+omp plugin install npm:pi-qoder-provider
+# or
+npm install -g pi-qoder-provider
 ```
 
 Restart OMP fully (quit all windows, not just open a new chat), then verify:
@@ -34,9 +39,15 @@ omp plugin list
 omp plugin doctor
 ```
 
-You should see `pi-provider-qoder` enabled, with `pi.extensions` pointing at `./src/index.ts`.
+You should see `pi-qoder-provider` enabled, with `pi.extensions` pointing at `./src/index.ts`.
 
-#### 2. Local clone (for contributors / debugging)
+#### 2. OMP git install
+
+```bash
+omp plugin install github:minglu6/pi-provider-qoder
+```
+
+#### 3. Local clone (for contributors / debugging)
 
 ```bash
 git clone https://github.com/minglu6/pi-provider-qoder.git
@@ -46,14 +57,6 @@ omp plugin link "$(pwd)"
 ```
 
 After `git pull`, restart OMP (and rebuild with `npm run build` if you rely on `dist/`).
-
-#### 3. npm registry
-
-```bash
-omp plugin install npm:pi-provider-qoder
-# or
-npm install -g pi-provider-qoder
-```
 
 ### Login
 
