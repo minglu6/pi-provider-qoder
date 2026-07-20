@@ -54,13 +54,21 @@ function createQoderOAuth(providerID: string, mode: string): OAuthConfigWithUsag
   };
 }
 
-function registerQoderProvider(pi: ExtensionAPI, providerID: string, mode: string): void {
-  const oauth = createQoderOAuth(providerID, mode);
-  pi.registerProvider(providerID, {
+// ModelRegistry requires apiKey or oauth whenever models are present, including
+// re-registration after a cache refresh. Always include oauth so session_start
+// can publish an updated model list without failing validation.
+function modelConfigForProvider(mode: string, providerID: string): Pick<ProviderConfig, "api" | "baseUrl" | "models" | "oauth"> {
+  return {
     baseUrl: getQoderBaseUrl(mode),
     api: "qoder-api" as Api,
     models: modelsForProvider(mode, providerID) as unknown as ProviderConfig["models"],
-    oauth: oauth as ProviderConfig["oauth"],
+    oauth: createQoderOAuth(providerID, mode) as ProviderConfig["oauth"],
+  };
+}
+
+function registerQoderProvider(pi: ExtensionAPI, providerID: string, mode: string): void {
+  pi.registerProvider(providerID, {
+    ...modelConfigForProvider(mode, providerID),
     streamSimple: streamQoder,
   });
 }
@@ -85,6 +93,10 @@ export default function (pi: ExtensionAPI) {
         const name = creds.name || (isQoderCNMode(mode) ? "Qoder CN User" : "Qoder User");
         const email = creds.email || getQoderUserEmailFallback(mode);
         await updateQoderModelsCache(accessToken, userID, name, email, mode);
+        // The provider was registered before session_start from the previous cache.
+        // Publish the refreshed snapshot immediately so the current model picker
+        // sees newly released models without restarting OMP.
+        ctx.modelRegistry.registerProvider(providerID, modelConfigForProvider(mode, providerID));
       } catch {
         // Best-effort: fall back to the existing cache / static models.
       }
