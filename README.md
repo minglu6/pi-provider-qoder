@@ -1,8 +1,52 @@
 # pi-qoder-provider
 
+English | [中文](./README.zh-CN.md)
+
 A [pi](https://shittycodingagent.ai/) provider extension that connects pi to the **Qoder API**, exposing Qoder Global and Qoder China models through provider surfaces.
 
 Published on npm as `pi-qoder-provider` (GitHub repo remains `minglu6/pi-provider-qoder`).
+
+## Instructions for AI agents
+
+Copy-paste this block when asking an agent to install and configure this plugin:
+
+```text
+Install and enable the Qoder provider for OMP/pi:
+
+1. Install:
+   omp plugin uninstall pi-qoder-provider
+   omp plugin uninstall pi-provider-qoder
+   omp plugin install npm:pi-qoder-provider
+2. Fully quit and restart OMP (not just a new chat).
+3. Verify: omp plugin list && omp plugin doctor
+4. REQUIRED before first use — set environment variables in the shell that launches
+   OMP/pi. Without them the provider cannot authenticate and is unusable.
+
+Choose ONE profile:
+
+A) Global / international:
+   export QODER_PERSONAL_ACCESS_TOKEN=pt-...   # or QODER_PAT
+   Then: /login qoder   OR start with: pi --provider qoder --model auto
+
+B) China public cloud:
+   export QODER_REGION=cn
+   export QODERCN_PERSONAL_ACCESS_TOKEN=pt-...   # or QODERCN_PAT
+   Then: /login qoder-cn   OR: pi --provider qoder-cn --model auto
+
+C) China enterprise VPC (most common failure if missed):
+   export QODER_REGION=cn
+   export QODER_VPC_INSTANCE=<instance>   # the name before .vpc.qoder.com.cn
+   export QODERCN_PERSONAL_ACCESS_TOKEN=pt-...   # MUST be a VPC-tenant PAT
+   Then: /login qoder-cn   OR: pi --provider qoder-cn --model auto
+
+Hard rules:
+- Do NOT skip env vars and expect /login alone to fix VPC routing.
+- Without QODER_VPC_INSTANCE (or QODERCN_VPC_ENDPOINT), VPC login/API calls fail
+  (often CSRFInvalid / wrong host).
+- Without a PAT env var or a successful /login, requests fail with credentials not set.
+- Never put PAT values into git, README, or chat logs.
+- Prefer provider qoder-cn for China/VPC; do not guess public hosts for VPC tenants.
+```
 
 ## Features
 
