@@ -14,6 +14,12 @@ import {
 
 export const ZERO_COST = Object.freeze({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 
+export interface QoderThinkingDef {
+  mode: "effort";
+  efforts: string[];
+  defaultLevel?: string;
+}
+
 /** Shape of a single entry returned by the Qoder /model/list endpoint. */
 export interface QoderModelEntry {
   key?: string;
@@ -24,7 +30,11 @@ export interface QoderModelEntry {
   context_config?: Record<string, { token_count?: number }>;
   is_vl?: boolean;
   is_reasoning?: boolean;
-  thinking_config?: { enabled?: { efforts?: unknown } };
+  thinking_config?: {
+    enabled?: {
+      efforts?: Record<string, { description?: string; is_default?: boolean }>;
+    };
+  };
   source?: string;
   [key: string]: unknown;
 }
@@ -37,6 +47,8 @@ export interface QoderModelDef {
   baseUrl: string;
   reasoning: boolean;
   supportsEffort: boolean;
+  /** Explicit thinking effort surface forwarded to the host (OMP thinking levels). */
+  thinking?: QoderThinkingDef;
   input: ("text" | "image")[];
   cost: typeof ZERO_COST;
   contextWindow: number;
@@ -153,6 +165,7 @@ export const staticModels: QoderModelDef[] = [
     baseUrl: "https://api3.qoder.sh/",
     reasoning: true,
     supportsEffort: true,
+    thinking: { mode: "effort", efforts: ["high", "max"], defaultLevel: "max" },
     input: ["text", "image"],
     cost: ZERO_COST,
     contextWindow: 1000000,
@@ -166,6 +179,7 @@ export const staticModels: QoderModelDef[] = [
     baseUrl: "https://api3.qoder.sh/",
     reasoning: true,
     supportsEffort: true,
+    thinking: { mode: "effort", efforts: ["high", "max"], defaultLevel: "max" },
     input: ["text", "image"],
     cost: ZERO_COST,
     contextWindow: 1000000,
@@ -276,7 +290,8 @@ export const staticCnModels: QoderModelDef[] = [
     provider: "qoder-cn",
     baseUrl: getQoderBaseUrl("cn"),
     reasoning: true,
-    supportsEffort: false,
+    supportsEffort: true,
+    thinking: { mode: "effort", efforts: ["high", "max"], defaultLevel: "max" },
     input: ["text"],
     cost: ZERO_COST,
     contextWindow: 1000000,
@@ -289,8 +304,9 @@ export const staticCnModels: QoderModelDef[] = [
     api: "qoder-api",
     provider: "qoder-cn",
     baseUrl: getQoderBaseUrl("cn"),
-    reasoning: false,
-    supportsEffort: false,
+    reasoning: true,
+    supportsEffort: true,
+    thinking: { mode: "effort", efforts: ["high", "max"], defaultLevel: "max" },
     input: ["text"],
     cost: ZERO_COST,
     contextWindow: 1000000,
@@ -340,6 +356,25 @@ export const staticCnModels: QoderModelDef[] = [
     description: "Qoder CN mmodel; live catalog reports 200K context.",
   },
 ];
+
+/**
+ * Forward the upstream thinking effort surface (e.g. `high`/`max` for
+ * DeepSeek V4) as explicit model metadata so the host offers exactly the
+ * wire-supported levels instead of inferring a generic fallback ladder.
+ */
+export function deriveQoderThinking(entry: QoderModelEntry, isReasoning: boolean): QoderThinkingDef | undefined {
+  if (!isReasoning) return undefined;
+  const effortsObj = entry.thinking_config?.enabled?.efforts;
+  if (!effortsObj || typeof effortsObj !== "object") return undefined;
+  const efforts = Object.keys(effortsObj);
+  if (efforts.length === 0) return undefined;
+  const defaultEffort = Object.entries(effortsObj).find(([, cfg]) => cfg?.is_default)?.[0];
+  return {
+    mode: "effort",
+    efforts,
+    ...(defaultEffort ? { defaultLevel: defaultEffort } : {}),
+  };
+}
 
 export function getCachedModels(mode?: string): QoderModelDef[] {
   const cachePath = getQoderCachePath(mode);
@@ -465,6 +500,7 @@ export async function updateQoderModelsCache(
       const isVL = !!entry.is_vl;
       const isReasoning = !!entry.is_reasoning || !!entry.thinking_config;
       const supportsEffort = !!entry.thinking_config?.enabled?.efforts;
+      const thinking = deriveQoderThinking(entry, isReasoning);
       const modelInfo = isQoderCNMode(mode) ? getQoderCNFriendlyModelInfo(key, display) : { id: key, name: display };
 
       configs[key] = entry;
@@ -478,6 +514,7 @@ export async function updateQoderModelsCache(
         baseUrl: getQoderBaseUrl(mode),
         reasoning: isReasoning,
         supportsEffort,
+        thinking,
         input: isVL ? ["text", "image"] : ["text"],
         cost: ZERO_COST,
         contextWindow: ctxLen,

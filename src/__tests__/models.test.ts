@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { staticCnModels, staticModels, ZERO_COST } from "../models.js";
+import { deriveQoderThinking, staticCnModels, staticModels, ZERO_COST } from "../models.js";
 
 // ── staticModels ──────────────────────────────────────────────────────────
 
@@ -32,6 +32,14 @@ describe("staticModels", () => {
   it("has unique IDs", () => {
     const ids = staticModels.map((m) => m.id);
     expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it("DeepSeek V4 models declare high/max thinking efforts", () => {
+    for (const id of ["dmodel", "dfmodel"]) {
+      const m = staticModels.find((model) => model.id === id);
+      expect(m).toBeTruthy();
+      expect(m?.thinking).toEqual({ mode: "effort", efforts: ["high", "max"], defaultLevel: "max" });
+    }
   });
 });
 
@@ -72,6 +80,60 @@ describe("staticCnModels", () => {
     for (const m of staticCnModels) {
       expect(m.description).toBeTruthy();
     }
+  });
+
+  it("CN DeepSeek V4 models declare high/max thinking efforts", () => {
+    for (const id of ["deepseek-v4-pro", "deepseek-v4-flash"]) {
+      const m = staticCnModels.find((model) => model.id === id);
+      expect(m).toBeTruthy();
+      expect(m?.reasoning).toBe(true);
+      expect(m?.supportsEffort).toBe(true);
+      expect(m?.thinking).toEqual({ mode: "effort", efforts: ["high", "max"], defaultLevel: "max" });
+    }
+  });
+});
+
+// ── deriveQoderThinking ───────────────────────────────────────────────────
+
+describe("deriveQoderThinking", () => {
+  it("maps upstream effort entries to a thinking surface with default", () => {
+    const thinking = deriveQoderThinking(
+      {
+        key: "dfmodel",
+        thinking_config: {
+          enabled: {
+            efforts: {
+              high: { description: "High thinking intensity" },
+              max: { description: "Maximum", is_default: true },
+            },
+          },
+        },
+      },
+      true,
+    );
+    expect(thinking).toEqual({ mode: "effort", efforts: ["high", "max"], defaultLevel: "max" });
+  });
+
+  it("returns undefined without default effort", () => {
+    const thinking = deriveQoderThinking(
+      {
+        key: "dfmodel",
+        thinking_config: { enabled: { efforts: { high: {} } } },
+      },
+      true,
+    );
+    expect(thinking).toEqual({ mode: "effort", efforts: ["high"] });
+  });
+
+  it("returns undefined for non-reasoning models", () => {
+    expect(
+      deriveQoderThinking({ key: "lite", thinking_config: { enabled: { efforts: { high: {} } } } }, false),
+    ).toBeUndefined();
+  });
+
+  it("returns undefined without an efforts surface", () => {
+    expect(deriveQoderThinking({ key: "auto", thinking_config: { enabled: {} } }, true)).toBeUndefined();
+    expect(deriveQoderThinking({ key: "auto" }, true)).toBeUndefined();
   });
 });
 
