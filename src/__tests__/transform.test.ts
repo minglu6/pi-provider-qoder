@@ -222,7 +222,7 @@ describe("transformMessagesForQoder", () => {
     });
   });
 
-  it("sets content to null for assistant messages with empty content", () => {
+  it("keeps string content for assistant messages containing only tool calls", () => {
     const msgs = [
       {
         role: "assistant",
@@ -238,7 +238,7 @@ describe("transformMessagesForQoder", () => {
     ] as unknown as Message[];
     const result = transformMessagesForQoder(msgs);
     const msg0 = result[0] as { role: string; content: unknown; tool_calls?: unknown[] };
-    expect(msg0.content).toBeNull();
+    expect(msg0.content).toBe("");
     expect(msg0.tool_calls).toHaveLength(1);
   });
 });

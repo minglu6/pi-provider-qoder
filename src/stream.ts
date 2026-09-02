@@ -38,6 +38,34 @@ interface ToolCallState {
   contentIndex: number;
 }
 
+interface QoderToolCallDelta {
+  index?: number;
+  id?: string;
+  function?: {
+    name?: string;
+    arguments?: string;
+  };
+}
+
+interface QoderResponseDelta {
+  reasoning_content?: string;
+  content?: string;
+  tool_calls?: QoderToolCallDelta[];
+}
+
+interface QoderResponseChoice {
+  delta?: QoderResponseDelta;
+}
+
+interface QoderSseEnvelope {
+  statusCodeValue?: number;
+  body?: string;
+}
+
+interface QoderSseBody {
+  choices?: QoderResponseChoice[];
+}
+
 function stableHash(prefix: string, ...inputs: string[]): string {
   const hash = crypto.createHash("sha256");
   hash.update(prefix);
@@ -127,8 +155,7 @@ export function streamQoder(
 
       const qoderModel = isQoderCNMode(providerMode) ? getQoderCNDirectModel(model.id) : model.id;
       const cachedConfig =
-        getCachedModelConfig(model.id, providerMode) ||
-        getCachedModelConfig(qoderModel, providerMode);
+        getCachedModelConfig(model.id, providerMode) || getCachedModelConfig(qoderModel, providerMode);
       const fallbackConfig: QoderModelEntry = {
         key: qoderModel,
         is_reasoning:
@@ -140,8 +167,7 @@ export function streamQoder(
         source: "system",
       };
       const reasoningOption = options?.reasoning as unknown;
-      const requestedEffort =
-        reasoningOption === "high" || reasoningOption === "max" ? reasoningOption : undefined;
+      const requestedEffort = reasoningOption === "high" || reasoningOption === "max" ? reasoningOption : undefined;
       const modelConfig = requestedEffort
         ? withQoderThinkingEffort(cachedConfig || fallbackConfig, requestedEffort)
         : cachedConfig || fallbackConfig;
@@ -231,9 +257,9 @@ export function streamQoder(
         },
       };
       if (process.env.QODER_LOG_MODEL_CONFIG === "1") {
-        const selectedEffort = Object.entries(
-          modelConfig.thinking_config?.enabled?.efforts || {},
-        ).find(([, config]) => config?.is_default)?.[0];
+        const selectedEffort = Object.entries(modelConfig.thinking_config?.enabled?.efforts || {}).find(
+          ([, config]) => config?.is_default,
+        )?.[0];
         console.log(
           JSON.stringify({
             event: "qoder_request_model_config",
@@ -318,108 +344,113 @@ export function streamQoder(
             break;
           }
 
+          let envelope: QoderSseEnvelope;
           try {
-            const envelope = JSON.parse(dataStr);
-            if (envelope.statusCodeValue && envelope.statusCodeValue !== 200) {
-              throw new Error(`Upstream status ${envelope.statusCodeValue}: ${envelope.body}`);
-            }
+            envelope = JSON.parse(dataStr) as QoderSseEnvelope;
+          } catch {
+            throw new Error("Qoder SSE envelope is not valid JSON");
+          }
+          if (envelope.statusCodeValue && envelope.statusCodeValue !== 200) {
+            throw new Error(`Upstream status ${envelope.statusCodeValue}: ${envelope.body}`);
+          }
 
-            const innerStr = envelope.body;
-            if (!innerStr || innerStr === "[DONE]") continue;
+          const innerStr = envelope.body;
+          if (!innerStr || innerStr === "[DONE]") continue;
 
-            const inner = JSON.parse(innerStr);
-            if (inner.choices && inner.choices.length > 0) {
-              const choice = inner.choices[0];
-              const delta = choice.delta;
+          let inner: QoderSseBody;
+          try {
+            inner = JSON.parse(String(innerStr)) as QoderSseBody;
+          } catch {
+            throw new Error("Qoder SSE response body is not valid JSON");
+          }
+          if (inner.choices && inner.choices.length > 0) {
+            const choice = inner.choices[0];
+            const delta = choice.delta;
 
-              if (delta) {
-                // 1. Process reasoning/thinking content (API reasoning)
-                if (delta.reasoning_content) {
-                  if (thinkingBlockIndex === -1) {
-                    thinkingBlockIndex = output.content.length;
-                    output.content.push({ type: "thinking", thinking: "" });
-                    stream.push({ type: "thinking_start", contentIndex: thinkingBlockIndex, partial: output });
-                  }
+            if (delta) {
+              // 1. Process reasoning/thinking content (API reasoning)
+              if (delta.reasoning_content) {
+                if (thinkingBlockIndex === -1) {
+                  thinkingBlockIndex = output.content.length;
+                  output.content.push({ type: "thinking", thinking: "" });
+                  stream.push({ type: "thinking_start", contentIndex: thinkingBlockIndex, partial: output });
+                }
+                const block = output.content[thinkingBlockIndex] as ThinkingContent;
+                block.thinking += delta.reasoning_content;
+                stream.push({
+                  type: "thinking_delta",
+                  contentIndex: thinkingBlockIndex,
+                  delta: delta.reasoning_content,
+                  partial: output,
+                });
+              }
+
+              // 2. Process text content
+              if (delta.content) {
+                // End API thinking block if active
+                if (thinkingBlockIndex !== -1) {
                   const block = output.content[thinkingBlockIndex] as ThinkingContent;
-                  block.thinking += delta.reasoning_content;
                   stream.push({
-                    type: "thinking_delta",
+                    type: "thinking_end",
                     contentIndex: thinkingBlockIndex,
-                    delta: delta.reasoning_content,
+                    content: block.thinking,
+                    partial: output,
+                  });
+                  thinkingBlockIndex = -1;
+                }
+
+                if (thinkingParser) {
+                  thinkingParser.processChunk(delta.content);
+                } else {
+                  if (contentBlockIndex === -1) {
+                    contentBlockIndex = output.content.length;
+                    output.content.push({ type: "text", text: "" });
+                    stream.push({ type: "text_start", contentIndex: contentBlockIndex, partial: output });
+                  }
+                  const block = output.content[contentBlockIndex] as TextContent;
+                  block.text += delta.content;
+                  stream.push({
+                    type: "text_delta",
+                    contentIndex: contentBlockIndex,
+                    delta: delta.content,
                     partial: output,
                   });
                 }
-
-                // 2. Process text content
-                if (delta.content) {
-                  // End API thinking block if active
-                  if (thinkingBlockIndex !== -1) {
-                    const block = output.content[thinkingBlockIndex] as ThinkingContent;
-                    stream.push({
-                      type: "thinking_end",
-                      contentIndex: thinkingBlockIndex,
-                      content: block.thinking,
-                      partial: output,
-                    });
-                    thinkingBlockIndex = -1;
-                  }
-
-                  if (thinkingParser) {
-                    thinkingParser.processChunk(delta.content);
-                  } else {
-                    if (contentBlockIndex === -1) {
-                      contentBlockIndex = output.content.length;
-                      output.content.push({ type: "text", text: "" });
-                      stream.push({ type: "text_start", contentIndex: contentBlockIndex, partial: output });
-                    }
-                    const block = output.content[contentBlockIndex] as TextContent;
-                    block.text += delta.content;
-                    stream.push({
-                      type: "text_delta",
-                      contentIndex: contentBlockIndex,
-                      delta: delta.content,
-                      partial: output,
-                    });
-                  }
-                }
-
-                // 3. Process tool calls
-                if (delta.tool_calls && Array.isArray(delta.tool_calls)) {
-                  for (const tc of delta.tool_calls) {
-                    const idx = tc.index ?? 0;
-                    if (!toolCallsState[idx]) {
-                      toolCallsState[idx] = { arguments: "", id: "", name: "", contentIndex: 0 };
-                    }
-                    const state = toolCallsState[idx];
-                    if (tc.id) state.id = tc.id;
-                    if (tc.function?.name) state.name = tc.function.name;
-                    if (tc.function?.arguments) {
-                      const argDelta = tc.function.arguments;
-                      state.arguments += argDelta;
-
-                      if (state.emittedStart === undefined) {
-                        state.emittedStart = true;
-                        state.contentIndex = output.content.length;
-                        const block: ToolCall = { type: "toolCall", id: state.id, name: state.name, arguments: {} };
-                        output.content.push(block);
-                        stream.push({ type: "toolcall_start", contentIndex: state.contentIndex, partial: output });
-                      }
-                      stream.push({
-                        type: "toolcall_delta",
-                        contentIndex: state.contentIndex,
-                        delta: argDelta,
-                        partial: output,
-                      });
-                    }
-                  }
-                }
               }
 
-              if (choice.finish_reason) {
-                output.stopReason = choice.finish_reason;
+              // 3. Process tool calls
+              if (delta.tool_calls && Array.isArray(delta.tool_calls)) {
+                for (const tc of delta.tool_calls) {
+                  const idx = tc.index ?? 0;
+                  if (!toolCallsState[idx]) {
+                    toolCallsState[idx] = { arguments: "", id: "", name: "", contentIndex: 0 };
+                  }
+                  const state = toolCallsState[idx];
+                  if (tc.id) state.id = tc.id;
+                  if (tc.function?.name) state.name = tc.function.name;
+                  if (tc.function?.arguments) {
+                    const argDelta = tc.function.arguments;
+                    state.arguments += argDelta;
+
+                    if (state.emittedStart === undefined) {
+                      state.emittedStart = true;
+                      state.contentIndex = output.content.length;
+                      const block: ToolCall = { type: "toolCall", id: state.id, name: state.name, arguments: {} };
+                      output.content.push(block);
+                      stream.push({ type: "toolcall_start", contentIndex: state.contentIndex, partial: output });
+                    }
+                    stream.push({
+                      type: "toolcall_delta",
+                      contentIndex: state.contentIndex,
+                      delta: argDelta,
+                      partial: output,
+                    });
+                  }
+                }
               }
             }
-          } catch {}
+
+          }
         }
       }
 
@@ -458,6 +489,10 @@ export function streamQoder(
             partial: output,
           });
         }
+      }
+
+      if (output.content.length === 0) {
+        throw new Error("Qoder upstream completed without assistant content");
       }
 
       if (toolCallsState.length > 0) {

@@ -137,7 +137,7 @@ export function transformMessagesForQoder(messages: Message[]): QoderMessage[] {
 
       const mapped: QoderMessage = {
         role: "assistant",
-        content: content || null,
+        content,
       };
       if (toolCalls.length > 0) {
         mapped.tool_calls = toolCalls;
