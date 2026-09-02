@@ -31,9 +31,16 @@ export interface QoderModelEntry {
   is_vl?: boolean;
   is_reasoning?: boolean;
   thinking_config?: {
-    enabled?: {
-      efforts?: Record<string, { description?: string; is_default?: boolean }>;
+    disabled?: {
+      is_default?: boolean;
+      [key: string]: unknown;
     };
+    enabled?: {
+      is_default?: boolean;
+      efforts?: Record<string, { description?: string; is_default?: boolean; [key: string]: unknown }>;
+      [key: string]: unknown;
+    };
+    [key: string]: unknown;
   };
   source?: string;
   [key: string]: unknown;
@@ -373,6 +380,65 @@ export function deriveQoderThinking(entry: QoderModelEntry, isReasoning: boolean
     mode: "effort",
     efforts,
     ...(defaultEffort ? { defaultLevel: defaultEffort } : {}),
+  };
+}
+
+/** Model identity, mirroring the host catalog's class/family classification. */
+export interface QoderModelIdentity {
+  class: string;
+  family?: string;
+}
+
+/**
+ * Host (omp v18) reads `model.identity.class` on stream paths without null
+ * guards; plugin models must carry an identity or the turn dies with
+ * "undefined is not an object (evaluating 'e.identity.class')".
+ */
+export function qoderModelIdentity(id: string): QoderModelIdentity {
+  const lower = id.toLowerCase();
+  if (lower.includes("deepseek")) {
+    if (lower.includes("v4") && lower.includes("flash")) return { class: "deepseek", family: "flash" };
+    if (lower.includes("v4") && lower.includes("pro")) return { class: "deepseek", family: "pro" };
+    if (lower.includes("v4")) return { class: "deepseek", family: "v4" };
+    if (lower.includes("v3")) return { class: "deepseek", family: "v3" };
+    if (lower.includes("r1")) return { class: "deepseek", family: "r1" };
+    return { class: "deepseek" };
+  }
+  if (lower.includes("glm")) return { class: "glm" };
+  if (lower.includes("qwen")) return { class: "qwen" };
+  if (lower.includes("kimi")) return { class: "kimi" };
+  return { class: "unknown" };
+}
+
+export function withQoderThinkingEffort(
+  entry: QoderModelEntry,
+  effort: "high" | "max",
+): QoderModelEntry {
+  const configuredEfforts = entry.thinking_config?.enabled?.efforts;
+  if (!configuredEfforts?.[effort]) {
+    throw new Error(`Qoder model ${entry.key || "unknown"} does not support thinking effort ${effort}`);
+  }
+  const efforts = Object.fromEntries(
+    Object.entries(configuredEfforts).map(([name, config]) => [
+      name,
+      { ...config, is_default: name === effort },
+    ]),
+  );
+  return {
+    ...entry,
+    is_reasoning: true,
+    thinking_config: {
+      ...entry.thinking_config,
+      disabled: {
+        ...entry.thinking_config?.disabled,
+        is_default: false,
+      },
+      enabled: {
+        ...entry.thinking_config?.enabled,
+        is_default: true,
+        efforts,
+      },
+    },
   };
 }
 

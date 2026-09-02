@@ -23,7 +23,7 @@ import {
   logCosyRequest,
   logCosyResponse,
 } from "./cosy.js";
-import { getCachedModelConfig } from "./models.js";
+import { getCachedModelConfig, type QoderModelEntry, withQoderThinkingEffort } from "./models.js";
 import { resolveQoderIdentity } from "./oauth.js";
 import { qoderEncodeBody } from "./qoder-encoding.js";
 import { ThinkingTagParser } from "./thinking-parser.js";
@@ -126,7 +126,10 @@ export function streamQoder(
       const machineID = identity.machineID || getMachineId();
 
       const qoderModel = isQoderCNMode(providerMode) ? getQoderCNDirectModel(model.id) : model.id;
-      const modelConfig = getCachedModelConfig(qoderModel, providerMode) || {
+      const cachedConfig =
+        getCachedModelConfig(model.id, providerMode) ||
+        getCachedModelConfig(qoderModel, providerMode);
+      const fallbackConfig: QoderModelEntry = {
         key: qoderModel,
         is_reasoning:
           qoderModel === "ultimate" ||
@@ -136,6 +139,12 @@ export function streamQoder(
         max_output_tokens: 32768,
         source: "system",
       };
+      const reasoningOption = options?.reasoning as unknown;
+      const requestedEffort =
+        reasoningOption === "high" || reasoningOption === "max" ? reasoningOption : undefined;
+      const modelConfig = requestedEffort
+        ? withQoderThinkingEffort(cachedConfig || fallbackConfig, requestedEffort)
+        : cachedConfig || fallbackConfig;
       modelConfig.key = qoderModel;
 
       const isReasoning = !!modelConfig.is_reasoning;
@@ -192,7 +201,10 @@ export function streamQoder(
         system: systemText,
         messages: normalizedMessages,
         tools: toolsRaw || [],
-        parameters: { max_tokens: maxTokens },
+        parameters: {
+          max_tokens: maxTokens,
+          ...(requestedEffort ? { reasoning_effort: requestedEffort } : {}),
+        },
         chat_context: {
           chatPrompt: "",
           imageUrls: null,
@@ -218,6 +230,21 @@ export function streamQoder(
           begin_at: Date.now(),
         },
       };
+      if (process.env.QODER_LOG_MODEL_CONFIG === "1") {
+        const selectedEffort = Object.entries(
+          modelConfig.thinking_config?.enabled?.efforts || {},
+        ).find(([, config]) => config?.is_default)?.[0];
+        console.log(
+          JSON.stringify({
+            event: "qoder_request_model_config",
+            model_key: qoderModel,
+            is_reasoning: modelConfig.is_reasoning,
+            requested_effort: requestedEffort,
+            selected_effort: selectedEffort,
+            enable_thinking: modelConfig.thinking_config?.enabled?.is_default === true,
+          }),
+        );
+      }
 
       const bodyBytes = Buffer.from(JSON.stringify(reqBody));
       const encodedBody = qoderEncodeBody(bodyBytes);

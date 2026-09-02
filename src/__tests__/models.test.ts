@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deriveQoderThinking, staticCnModels, staticModels, ZERO_COST } from "../models.js";
+import { deriveQoderThinking, qoderModelIdentity, staticCnModels, staticModels, withQoderThinkingEffort, ZERO_COST } from "../models.js";
 
 // ── staticModels ──────────────────────────────────────────────────────────
 
@@ -137,6 +137,38 @@ describe("deriveQoderThinking", () => {
   });
 });
 
+describe("withQoderThinkingEffort", () => {
+  const entry = {
+    key: "dfmodel",
+    is_reasoning: false,
+    thinking_config: {
+      disabled: { is_default: true },
+      enabled: {
+        is_default: false,
+        efforts: {
+          high: { description: "High", is_default: true },
+          max: { description: "Maximum" },
+        },
+      },
+    },
+  };
+
+  it("selects max explicitly and enables reasoning", () => {
+    const configured = withQoderThinkingEffort(entry, "max");
+    expect(configured.is_reasoning).toBe(true);
+    expect(configured.thinking_config?.disabled?.is_default).toBe(false);
+    expect(configured.thinking_config?.enabled?.is_default).toBe(true);
+    expect(configured.thinking_config?.enabled?.efforts?.high?.is_default).toBe(false);
+    expect(configured.thinking_config?.enabled?.efforts?.max?.is_default).toBe(true);
+  });
+
+  it("rejects an unsupported effort", () => {
+    expect(() => withQoderThinkingEffort(entry, "ultra" as "max")).toThrow(
+      "does not support thinking effort ultra",
+    );
+  });
+});
+
 // ── ZERO_COST ─────────────────────────────────────────────────────────────
 
 describe("ZERO_COST", () => {
@@ -146,5 +178,24 @@ describe("ZERO_COST", () => {
 
   it("is frozen", () => {
     expect(Object.isFrozen(ZERO_COST)).toBe(true);
+  });
+});
+
+// ── qoderModelIdentity ─────────────────────────────────────────────────────
+
+describe("qoderModelIdentity", () => {
+  it("classifies deepseek v4 variants with families", () => {
+    expect(qoderModelIdentity("deepseek-v4-flash")).toEqual({ class: "deepseek", family: "flash" });
+    expect(qoderModelIdentity("deepseek-v4-pro")).toEqual({ class: "deepseek", family: "pro" });
+  });
+
+  it("classifies glm and qwen without family", () => {
+    expect(qoderModelIdentity("glm-5.2")).toEqual({ class: "glm" });
+    expect(qoderModelIdentity("qwen3.7-plus")).toEqual({ class: "qwen" });
+  });
+
+  it("falls back to unknown for aliases", () => {
+    expect(qoderModelIdentity("auto")).toEqual({ class: "unknown" });
+    expect(qoderModelIdentity("dfmodel")).toEqual({ class: "unknown" });
   });
 });

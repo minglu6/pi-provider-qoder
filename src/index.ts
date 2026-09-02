@@ -7,7 +7,7 @@ import {
   isQoderCNMode,
   toQoderCNFriendlyModel,
 } from "./cosy.js";
-import { getCachedModels, isCacheStale, staticCnModels, staticModels, updateQoderModelsCache } from "./models.js";
+import { getCachedModels, isCacheStale, qoderModelIdentity, staticCnModels, staticModels, updateQoderModelsCache } from "./models.js";
 import { loginQoder, loginQoderCN, refreshQoderToken, refreshQoderTokenCN, resolveQoderIdentity } from "./oauth.js";
 import { streamQoder } from "./stream.js";
 import { fetchQoderUsage, fetchQoderUsageCN } from "./usage.js";
@@ -28,6 +28,7 @@ function modelsForProvider(mode: string, providerID: string): Model<Api>[] {
       ...model,
       provider: providerID,
       baseUrl: getQoderBaseUrl(mode),
+      identity: qoderModelIdentity(model.id),
     };
   }) as unknown as Model<Api>[];
 }
