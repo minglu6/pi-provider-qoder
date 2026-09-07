@@ -73,7 +73,7 @@ function envelope(body: unknown, statusCodeValue = 200): string {
   return JSON.stringify({ statusCodeValue, body: typeof body === "string" ? body : JSON.stringify(body) });
 }
 
-describe("streamQoder SSE failures", () => {
+describe("streamQoder SSE handling", () => {
   beforeEach(() => {
     mocks.fetch.mockReset();
     mocks.resolveQoderIdentity.mockReset().mockResolvedValue({
@@ -131,5 +131,76 @@ describe("streamQoder SSE failures", () => {
 
     expect(result.stopReason).toBe("stop");
     expect(result.content).toEqual([{ type: "text", text: "pong" }]);
+  });
+
+  it("preserves a no-argument tool call whose first delta has empty arguments", async () => {
+    mocks.fetch.mockResolvedValue(
+      responseWithSse(
+        envelope({
+          choices: [
+            {
+              delta: {
+                tool_calls: [{ index: 0, id: "call_1", function: { name: "noop", arguments: "" } }],
+              },
+            },
+          ],
+        }),
+        "[DONE]",
+      ),
+    );
+
+    const result = await streamQoder(model, context, options).result();
+
+    expect(result.stopReason).toBe("toolUse");
+    expect(result.content).toEqual([{ type: "toolCall", id: "call_1", name: "noop", arguments: {} }]);
+  });
+
+  it("assembles chunked tool arguments after an empty metadata delta", async () => {
+    mocks.fetch.mockResolvedValue(
+      responseWithSse(
+        envelope({
+          choices: [
+            {
+              delta: {
+                tool_calls: [{ index: 0, id: "call_1", function: { name: "write_file", arguments: "" } }],
+              },
+            },
+          ],
+        }),
+        envelope({
+          choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '{"path":"/tmp/test"}' } }] } }],
+        }),
+        "[DONE]",
+      ),
+    );
+
+    const result = await streamQoder(model, context, options).result();
+
+    expect(result.stopReason).toBe("toolUse");
+    expect(result.content).toEqual([
+      { type: "toolCall", id: "call_1", name: "write_file", arguments: { path: "/tmp/test" } },
+    ]);
+  });
+
+  it("surfaces malformed tool arguments instead of invoking the tool with an empty object", async () => {
+    mocks.fetch.mockResolvedValue(
+      responseWithSse(
+        envelope({
+          choices: [
+            {
+              delta: {
+                tool_calls: [{ index: 0, id: "call_1", function: { name: "write_file", arguments: '{"path":' } }],
+              },
+            },
+          ],
+        }),
+        "[DONE]",
+      ),
+    );
+
+    const result = await streamQoder(model, context, options).result();
+
+    expect(result.stopReason).toBe("error");
+    expect(result.errorMessage).toBe("Qoder tool call arguments are not valid JSON (write_file)");
   });
 });

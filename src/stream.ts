@@ -33,8 +33,6 @@ interface ToolCallState {
   arguments: string;
   id: string;
   name: string;
-  emittedStart?: boolean;
-  emittedEnd?: boolean;
   contentIndex: number;
 }
 
@@ -64,6 +62,23 @@ interface QoderSseEnvelope {
 
 interface QoderSseBody {
   choices?: QoderResponseChoice[];
+}
+
+function parseToolCallArguments(state: ToolCallState): Record<string, unknown> {
+  if (!state.arguments.trim()) return {};
+  const identity = state.name || state.id || "unknown";
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(state.arguments);
+  } catch {
+    throw new Error(`Qoder tool call arguments are not valid JSON (${identity})`);
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`Qoder tool call arguments must be a JSON object (${identity})`);
+  }
+  return parsed as Record<string, unknown>;
 }
 
 function stableHash(prefix: string, ...inputs: string[]): string {
@@ -317,7 +332,7 @@ export function streamQoder(
 
       let contentBlockIndex = -1;
       let thinkingBlockIndex = -1;
-      const toolCallsState: ToolCallState[] = [];
+      const toolCallsState = new Map<number, ToolCallState>();
 
       const thinkingEnabled = (options?.reasoning as unknown) !== false && (options?.reasoning as unknown) !== "off";
       const thinkingParser = thinkingEnabled ? new ThinkingTagParser(output, stream) : null;
@@ -422,34 +437,45 @@ export function streamQoder(
               if (delta.tool_calls && Array.isArray(delta.tool_calls)) {
                 for (const tc of delta.tool_calls) {
                   const idx = tc.index ?? 0;
-                  if (!toolCallsState[idx]) {
-                    toolCallsState[idx] = { arguments: "", id: "", name: "", contentIndex: 0 };
-                  }
-                  const state = toolCallsState[idx];
-                  if (tc.id) state.id = tc.id;
-                  if (tc.function?.name) state.name = tc.function.name;
-                  if (tc.function?.arguments) {
-                    const argDelta = tc.function.arguments;
-                    state.arguments += argDelta;
-
-                    if (state.emittedStart === undefined) {
-                      state.emittedStart = true;
-                      state.contentIndex = output.content.length;
-                      const block: ToolCall = { type: "toolCall", id: state.id, name: state.name, arguments: {} };
-                      output.content.push(block);
-                      stream.push({ type: "toolcall_start", contentIndex: state.contentIndex, partial: output });
-                    }
-                    stream.push({
-                      type: "toolcall_delta",
-                      contentIndex: state.contentIndex,
-                      delta: argDelta,
-                      partial: output,
+                  let state = toolCallsState.get(idx);
+                  if (!state) {
+                    state = {
+                      arguments: "",
+                      id: tc.id || "",
+                      name: tc.function?.name || "",
+                      contentIndex: output.content.length,
+                    };
+                    toolCallsState.set(idx, state);
+                    output.content.push({
+                      type: "toolCall",
+                      id: state.id,
+                      name: state.name,
+                      arguments: {},
                     });
+                    stream.push({ type: "toolcall_start", contentIndex: state.contentIndex, partial: output });
                   }
+
+                  const block = output.content[state.contentIndex] as ToolCall;
+                  if (tc.id) {
+                    state.id = tc.id;
+                    block.id = tc.id;
+                  }
+                  if (tc.function?.name) {
+                    state.name = tc.function.name;
+                    block.name = tc.function.name;
+                  }
+
+                  const argDelta = tc.function?.arguments || "";
+                  state.arguments += argDelta;
+                  stream.push({
+                    type: "toolcall_delta",
+                    contentIndex: state.contentIndex,
+                    delta: argDelta,
+                    partial: output,
+                  });
                 }
               }
             }
-
           }
         }
       }
@@ -468,34 +494,28 @@ export function streamQoder(
         });
       }
 
-      for (const state of toolCallsState) {
-        if (state?.emittedStart && !state.emittedEnd) {
-          state.emittedEnd = true;
-          let args = {};
-          try {
-            args = JSON.parse(state.arguments || "{}");
-          } catch {}
-          const block = output.content[state.contentIndex] as ToolCall;
-          block.arguments = args;
-          stream.push({
-            type: "toolcall_end",
-            contentIndex: state.contentIndex,
-            toolCall: {
-              type: "toolCall",
-              id: state.id,
-              name: state.name,
-              arguments: args,
-            },
-            partial: output,
-          });
-        }
+      for (const state of toolCallsState.values()) {
+        const args = parseToolCallArguments(state);
+        const block = output.content[state.contentIndex] as ToolCall;
+        block.arguments = args;
+        stream.push({
+          type: "toolcall_end",
+          contentIndex: state.contentIndex,
+          toolCall: {
+            type: "toolCall",
+            id: state.id,
+            name: state.name,
+            arguments: args,
+          },
+          partial: output,
+        });
       }
 
       if (output.content.length === 0) {
         throw new Error("Qoder upstream completed without assistant content");
       }
 
-      if (toolCallsState.length > 0) {
+      if (toolCallsState.size > 0) {
         output.stopReason = "toolUse";
       } else {
         output.stopReason = "stop";
