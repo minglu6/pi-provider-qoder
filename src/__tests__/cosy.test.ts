@@ -307,22 +307,13 @@ describe("getQoderUserEmailFallback", () => {
 // ── getQoderCNDirectModel ─────────────────────────────────────────────────
 
 describe("getQoderCNDirectModel", () => {
-  it("maps known model IDs to internal keys", () => {
+  it("only remaps the provider alias to auto", () => {
     expect(getQoderCNDirectModel("qoder-cn")).toBe("auto");
-    expect(getQoderCNDirectModel("qwen3.7-max")).toBe("qmodel_latest");
-    expect(getQoderCNDirectModel("qwen3.7-plus")).toBe("qmodel");
-    expect(getQoderCNDirectModel("qwen3.6-plus")).toBe("qmodel");
-    expect(getQoderCNDirectModel("qwen3.6-flash")).toBe("q36fmodel");
-    expect(getQoderCNDirectModel("deepseek-v4-pro")).toBe("dmodel");
-    expect(getQoderCNDirectModel("deepseek-v4-flash")).toBe("dfmodel");
-    expect(getQoderCNDirectModel("glm-5.2")).toBe("gm51model");
-    expect(getQoderCNDirectModel("glm-5.1")).toBe("gm51model");
-    expect(getQoderCNDirectModel("kimi-k2.6")).toBe("kmodel");
-    expect(getQoderCNDirectModel("minimax-m2.7")).toBe("mmodel");
-    expect(getQoderCNDirectModel("minimax-m3")).toBe("mmodel");
   });
 
-  it("returns the input ID for unknown models", () => {
+  it("keeps upstream wire keys unchanged", () => {
+    expect(getQoderCNDirectModel("qmodel_latest")).toBe("qmodel_latest");
+    expect(getQoderCNDirectModel("qmodel_38max")).toBe("qmodel_38max");
     expect(getQoderCNDirectModel("custom-model")).toBe("custom-model");
   });
 
@@ -335,10 +326,10 @@ describe("getQoderCNDirectModel", () => {
 // ── getQoderCNFriendlyModelInfo ───────────────────────────────────────────
 
 describe("getQoderCNFriendlyModelInfo", () => {
-  it("returns known friendly info for mapped keys", () => {
-    const info = getQoderCNFriendlyModelInfo("qmodel_latest");
-    expect(info.id).toBe("qwen3.7-max");
-    expect(info.name).toBe("Qwen 3.7 Max · Qoder CN");
+  it("uses the display label as list id because pi renders model.id", () => {
+    const info = getQoderCNFriendlyModelInfo("qmodel_latest", "Qwen3.7-Max");
+    expect(info.id).toBe("Qwen 3.7-Max");
+    expect(info.name).toBe("Qwen 3.7-Max · Qoder CN");
   });
 
   it("returns auto mapping", () => {
@@ -347,14 +338,15 @@ describe("getQoderCNFriendlyModelInfo", () => {
     expect(info.name).toBe("Auto · Qoder CN");
   });
 
-  it("generates friendly name for unknown keys", () => {
+  it("derives list id from display name for unknown keys", () => {
     const info = getQoderCNFriendlyModelInfo("my-custom-model", "My Custom Model");
-    expect(info.id).toBe("my-custom-model");
-    expect(info.name).toContain("Qoder CN");
+    expect(info.id).toBe("My Custom Model");
+    expect(info.name).toBe("My Custom Model · Qoder CN");
   });
 
   it("prettifies model names with version numbers", () => {
     const info = getQoderCNFriendlyModelInfo("some-model", "Qwen3.7-New");
+    expect(info.id).toBe("Qwen 3.7-New");
     expect(info.name).toContain("Qwen 3.7");
     expect(info.name).toContain("Qoder CN");
   });
@@ -363,10 +355,10 @@ describe("getQoderCNFriendlyModelInfo", () => {
 // ── toQoderCNFriendlyModel ────────────────────────────────────────────────
 
 describe("toQoderCNFriendlyModel", () => {
-  it("maps known model ID to friendly version", () => {
-    const result = toQoderCNFriendlyModel({ id: "qmodel_latest", name: "Original Name" });
-    expect(result.id).toBe("qwen3.7-max");
-    expect(result.name).toBe("Qwen 3.7 Max · Qoder CN");
+  it("promotes display_name into the host list id", () => {
+    const result = toQoderCNFriendlyModel({ id: "qmodel_latest", name: "Qwen3.7-Max" });
+    expect(result.id).toBe("Qwen 3.7-Max");
+    expect(result.name).toBe("Qwen 3.7-Max · Qoder CN");
   });
 
   it("preserves extra fields", () => {
@@ -380,7 +372,7 @@ describe("toQoderCNFriendlyModel", () => {
 
   it("handles unknown models by prettifying display name", () => {
     const result = toQoderCNFriendlyModel({ id: "custom", name: "CustomModel V2-Pro" });
-    expect(result.id).toBe("custom");
+    expect(result.id).toBe("CustomModel V2-Pro");
     expect(result.name).toContain("Qoder CN");
   });
 });

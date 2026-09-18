@@ -7,7 +7,7 @@ import {
   isQoderCNMode,
   toQoderCNFriendlyModel,
 } from "./cosy.js";
-import { getCachedModels, isCacheStale, qoderModelIdentity, staticCnModels, staticModels, updateQoderModelsCache } from "./models.js";
+import { getCachedModels, getCachedModelConfig, isCacheStale, qoderModelIdentity, deriveQoderThinkingLevelMap, staticCnModels, staticModels, updateQoderModelsCache } from "./models.js";
 import { loginQoder, loginQoderCN, refreshQoderToken, refreshQoderTokenCN, resolveQoderIdentity } from "./oauth.js";
 import { streamQoder } from "./stream.js";
 import { fetchQoderUsage, fetchQoderUsageCN } from "./usage.js";
@@ -24,11 +24,19 @@ function modelsForProvider(mode: string, providerID: string): Model<Api>[] {
 
   return modelsToUse.map((m) => {
     const model = isQoderCNMode(mode) ? toQoderCNFriendlyModel(m) : m;
+    const catalog =
+      getCachedModelConfig(model.id, mode) ||
+      getCachedModelConfig(m.id, mode) ||
+      (isQoderCNMode(mode) ? getCachedModelConfig(model.id, "cn") : null);
+    const thinkingLevelMap =
+      model.thinkingLevelMap ??
+      (catalog ? deriveQoderThinkingLevelMap(catalog, !!model.reasoning || !!catalog.is_reasoning) : undefined);
     return {
       ...model,
       provider: providerID,
       baseUrl: getQoderBaseUrl(mode),
       identity: qoderModelIdentity(model.id),
+      ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
     };
   }) as unknown as Model<Api>[];
 }

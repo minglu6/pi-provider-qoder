@@ -20,6 +20,25 @@ export interface QoderThinkingDef {
   defaultLevel?: string;
 }
 
+/** Pi thinking levels that the host can display / clamp against. */
+export type QoderThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
+/**
+ * Maps pi thinking levels to upstream effort labels.
+ * `null` marks a level unsupported so the host hides/clamps it.
+ */
+export type QoderThinkingLevelMap = Partial<Record<QoderThinkingLevel, string | null>>;
+
+const PI_THINKING_LEVELS: readonly QoderThinkingLevel[] = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+];
+
 /** Shape of a single entry returned by the Qoder /model/list endpoint. */
 export interface QoderModelEntry {
   key?: string;
@@ -56,6 +75,8 @@ export interface QoderModelDef {
   supportsEffort: boolean;
   /** Explicit thinking effort surface forwarded to the host (OMP thinking levels). */
   thinking?: QoderThinkingDef;
+  /** Pi uses this to hide unsupported levels (e.g. `high`) and clamp sticky defaults. */
+  thinkingLevelMap?: QoderThinkingLevelMap;
   input: ("text" | "image")[];
   cost: typeof ZERO_COST;
   contextWindow: number;
@@ -173,6 +194,15 @@ export const staticModels: QoderModelDef[] = [
     reasoning: true,
     supportsEffort: true,
     thinking: { mode: "effort", efforts: ["high", "max"], defaultLevel: "max" },
+    thinkingLevelMap: {
+      off: null,
+      minimal: null,
+      low: null,
+      medium: null,
+      high: "high",
+      xhigh: null,
+      max: "max",
+    },
     input: ["text", "image"],
     cost: ZERO_COST,
     contextWindow: 1000000,
@@ -187,6 +217,15 @@ export const staticModels: QoderModelDef[] = [
     reasoning: true,
     supportsEffort: true,
     thinking: { mode: "effort", efforts: ["high", "max"], defaultLevel: "max" },
+    thinkingLevelMap: {
+      off: null,
+      minimal: null,
+      low: null,
+      medium: null,
+      high: "high",
+      xhigh: null,
+      max: "max",
+    },
     input: ["text", "image"],
     cost: ZERO_COST,
     contextWindow: 1000000,
@@ -246,134 +285,34 @@ export const staticCnModels: QoderModelDef[] = [
     cost: ZERO_COST,
     contextWindow: 180000,
     maxTokens: 32768,
-    description: "Qoder CN smart routing; live catalog reports 180K max input.",
-  },
-  {
-    id: "qwen3.7-max",
-    name: "Qwen 3.7 Max · Qoder CN",
-    api: "qoder-api",
-    provider: "qoder-cn",
-    baseUrl: getQoderBaseUrl("cn"),
-    reasoning: true,
-    supportsEffort: false,
-    input: ["text", "image"],
-    cost: ZERO_COST,
-    contextWindow: 1000000,
-    maxTokens: 32768,
-    description: "Qoder CN qmodel_latest; context options 200K/400K/1M.",
-  },
-  {
-    id: "qwen3.7-plus",
-    name: "Qwen 3.7 Plus · Qoder CN",
-    api: "qoder-api",
-    provider: "qoder-cn",
-    baseUrl: getQoderBaseUrl("cn"),
-    reasoning: true,
-    supportsEffort: false,
-    input: ["text"],
-    cost: ZERO_COST,
-    contextWindow: 1000000,
-    maxTokens: 32768,
-    description: "Qoder CN qmodel; context options 200K/400K/1M.",
-  },
-  {
-    id: "qwen3.6-flash",
-    name: "Qwen 3.6 Flash · Qoder CN",
-    api: "qoder-api",
-    provider: "qoder-cn",
-    baseUrl: getQoderBaseUrl("cn"),
-    reasoning: true,
-    supportsEffort: false,
-    input: ["text"],
-    cost: ZERO_COST,
-    contextWindow: 1000000,
-    maxTokens: 32768,
-    description: "Qoder CN q36fmodel; context options 200K/400K/1M.",
-  },
-  {
-    id: "deepseek-v4-pro",
-    name: "DeepSeek V4 Pro · Qoder CN",
-    api: "qoder-api",
-    provider: "qoder-cn",
-    baseUrl: getQoderBaseUrl("cn"),
-    reasoning: true,
-    supportsEffort: true,
-    thinking: { mode: "effort", efforts: ["high", "max"], defaultLevel: "max" },
-    input: ["text"],
-    cost: ZERO_COST,
-    contextWindow: 1000000,
-    maxTokens: 32768,
-    description: "Qoder CN dmodel; context options 200K/400K/1M.",
-  },
-  {
-    id: "deepseek-v4-flash",
-    name: "DeepSeek V4 Flash · Qoder CN",
-    api: "qoder-api",
-    provider: "qoder-cn",
-    baseUrl: getQoderBaseUrl("cn"),
-    reasoning: true,
-    supportsEffort: true,
-    thinking: { mode: "effort", efforts: ["high", "max"], defaultLevel: "max" },
-    input: ["text"],
-    cost: ZERO_COST,
-    contextWindow: 1000000,
-    maxTokens: 32768,
-    description: "Qoder CN dfmodel; context options 200K/400K/1M.",
-  },
-  {
-    id: "glm-5.2",
-    name: "GLM 5.2 · Qoder CN",
-    api: "qoder-api",
-    provider: "qoder-cn",
-    baseUrl: getQoderBaseUrl("cn"),
-    reasoning: true,
-    supportsEffort: false,
-    input: ["text", "image"],
-    cost: ZERO_COST,
-    contextWindow: 200000,
-    maxTokens: 32768,
-    description: "Qoder CN gm51model; live catalog currently displays GLM-5.2 with 200K context.",
-  },
-  {
-    id: "kimi-k2.6",
-    name: "Kimi K2.6 · Qoder CN",
-    api: "qoder-api",
-    provider: "qoder-cn",
-    baseUrl: getQoderBaseUrl("cn"),
-    reasoning: true,
-    supportsEffort: false,
-    input: ["text", "image"],
-    cost: ZERO_COST,
-    contextWindow: 256000,
-    maxTokens: 32768,
-    description: "Qoder CN kmodel; context option 256K.",
-  },
-  {
-    id: "minimax-m2.7",
-    name: "MiniMax M2.7 · Qoder CN",
-    api: "qoder-api",
-    provider: "qoder-cn",
-    baseUrl: getQoderBaseUrl("cn"),
-    reasoning: false,
-    supportsEffort: false,
-    input: ["text"],
-    cost: ZERO_COST,
-    contextWindow: 200000,
-    maxTokens: 32768,
-    description: "Qoder CN mmodel; live catalog reports 200K context.",
+    description: "Qoder CN smart routing; live catalog is the source of truth for concrete models.",
   },
 ];
 
+/** Preferred display/order ladder for known Qoder effort labels. */
+const QODER_EFFORT_ORDER = ["low", "medium", "high", "xhigh", "max"] as const;
+
+function sortQoderEfforts(efforts: string[]): string[] {
+  return [...efforts].sort((a, b) => {
+    const ia = (QODER_EFFORT_ORDER as readonly string[]).indexOf(a);
+    const ib = (QODER_EFFORT_ORDER as readonly string[]).indexOf(b);
+    if (ia === -1 && ib === -1) return a.localeCompare(b);
+    if (ia === -1) return 1;
+    if (ib === -1) return -1;
+    return ia - ib;
+  });
+}
+
 /**
- * Forward the upstream thinking effort surface (e.g. `high`/`max` for
- * DeepSeek V4) as explicit model metadata so the host offers exactly the
- * wire-supported levels instead of inferring a generic fallback ladder.
+ * Forward the upstream thinking effort surface as explicit model metadata
+ * so the host offers exactly the wire-supported levels instead of inferring
+ * a generic fallback ladder.
  */
 export function deriveQoderThinking(entry: QoderModelEntry, isReasoning: boolean): QoderThinkingDef | undefined {
   if (!isReasoning) return undefined;
   const effortsObj = entry.thinking_config?.enabled?.efforts;
   if (!effortsObj || typeof effortsObj !== "object") return undefined;
-  const efforts = Object.keys(effortsObj);
+  const efforts = sortQoderEfforts(Object.keys(effortsObj));
   if (efforts.length === 0) return undefined;
   const defaultEffort = Object.entries(effortsObj).find(([, cfg]) => cfg?.is_default)?.[0];
   return {
@@ -381,6 +320,47 @@ export function deriveQoderThinking(entry: QoderModelEntry, isReasoning: boolean
     efforts,
     ...(defaultEffort ? { defaultLevel: defaultEffort } : {}),
   };
+}
+
+/**
+ * Build a pi `thinkingLevelMap` from the live catalog efforts.
+ * Unsupported host levels (e.g. sticky `high` on a model that only has
+ * `xhigh`/`medium`/`low`) are marked `null` so pi clamps/hides them.
+ */
+export function deriveQoderThinkingLevelMap(
+  entry: QoderModelEntry,
+  isReasoning: boolean,
+): QoderThinkingLevelMap | undefined {
+  if (!isReasoning) return undefined;
+  const effortsObj = entry.thinking_config?.enabled?.efforts;
+  if (!effortsObj || typeof effortsObj !== "object") return undefined;
+  const supported = new Set(Object.keys(effortsObj));
+  if (supported.size === 0) return undefined;
+
+  const map: QoderThinkingLevelMap = {};
+  for (const level of PI_THINKING_LEVELS) {
+    if (level === "off") {
+      // Prefer an explicit off when the catalog advertises a disabled mode.
+      map.off = entry.thinking_config?.disabled ? "off" : null;
+      continue;
+    }
+    map[level] = supported.has(level) ? level : null;
+  }
+  return map;
+}
+
+/**
+ * Extract a concrete thinking-effort label from the host `reasoning` option.
+ * Booleans / `off` are not effort levels — they only toggle thinking.
+ */
+export function resolveRequestedThinkingEffort(reasoning: unknown): string | undefined {
+  if (typeof reasoning !== "string") return undefined;
+  if (reasoning === "off" || reasoning === "true" || reasoning === "false") return undefined;
+  return reasoning.length > 0 ? reasoning : undefined;
+}
+
+export function qoderSupportsThinkingEffort(entry: QoderModelEntry, effort: string): boolean {
+  return !!entry.thinking_config?.enabled?.efforts?.[effort];
 }
 
 /** Model identity, mirroring the host catalog's class/family classification. */
@@ -410,13 +390,15 @@ export function qoderModelIdentity(id: string): QoderModelIdentity {
   return { class: "unknown" };
 }
 
-export function withQoderThinkingEffort(
-  entry: QoderModelEntry,
-  effort: "high" | "max",
-): QoderModelEntry {
+/**
+ * Apply a host-selected thinking effort onto the upstream model_config.
+ * If the model does not advertise that effort, leave the entry unchanged so
+ * the request keeps the catalog default instead of inventing levels or crashing.
+ */
+export function withQoderThinkingEffort(entry: QoderModelEntry, effort: string): QoderModelEntry {
   const configuredEfforts = entry.thinking_config?.enabled?.efforts;
   if (!configuredEfforts?.[effort]) {
-    throw new Error(`Qoder model ${entry.key || "unknown"} does not support thinking effort ${effort}`);
+    return entry;
   }
   const efforts = Object.fromEntries(
     Object.entries(configuredEfforts).map(([name, config]) => [
@@ -457,43 +439,26 @@ export function getCachedModels(mode?: string): QoderModelDef[] {
 
 export function getCachedModelConfig(modelKey: string, mode?: string): QoderModelEntry | null {
   const cachePath = getQoderCachePath(mode);
-  if (existsSync(cachePath)) {
-    try {
-      const data = JSON.parse(readFileSync(cachePath, "utf8"));
-      if (data?.configs?.[modelKey]) {
-        return data.configs[modelKey] as QoderModelEntry;
-      }
-    } catch {}
-  }
-
-  if (isQoderCNMode(mode)) {
-    const reasoningModels = new Set([
-      "qoder-cn",
-      "auto",
-      "qmodel_latest",
-      "qmodel",
-      "q36fmodel",
-      "qfmodel",
-      "dmodel",
-      "gm51model",
-      "kmodel",
-      "qwen3.7-max",
-      "qwen3.7-plus",
-      "qwen3.6-plus",
-      "qwen3.6-flash",
-      "deepseek-v4-pro",
-      "glm-5.2",
-      "glm-5.1",
-      "kimi-k2.6",
-    ]);
-    return {
-      key: modelKey,
-      is_reasoning: reasoningModels.has(modelKey),
-      max_output_tokens: 32768,
-      source: "system",
+  if (!existsSync(cachePath)) return null;
+  try {
+    const data = JSON.parse(readFileSync(cachePath, "utf8")) as {
+      configs?: Record<string, QoderModelEntry>;
     };
-  }
+    const configs = data.configs;
+    if (!configs || typeof configs !== "object") return null;
+    if (configs[modelKey]) return configs[modelKey] as QoderModelEntry;
 
+    // Host list id is the display label; resolve back to the catalog entry by
+    // recomputing that label from each entry's display_name (no hardcoded map).
+    if (isQoderCNMode(mode)) {
+      for (const entry of Object.values(configs)) {
+        const wireKey = entry?.key;
+        if (!wireKey) continue;
+        const listId = getQoderCNFriendlyModelInfo(wireKey, entry.display_name || wireKey).id;
+        if (listId === modelKey || wireKey === modelKey) return entry;
+      }
+    }
+  } catch {}
   return null;
 }
 
@@ -546,6 +511,7 @@ export async function updateQoderModelsCache(
 
     const newModels: QoderModelDef[] = [];
     const configs: Record<string, QoderModelEntry> = {};
+    const usedListIds = new Set<string>();
 
     for (const entry of chatModels) {
       const key = entry.key;
@@ -567,7 +533,14 @@ export async function updateQoderModelsCache(
       const isReasoning = !!entry.is_reasoning || !!entry.thinking_config;
       const supportsEffort = !!entry.thinking_config?.enabled?.efforts;
       const thinking = deriveQoderThinking(entry, isReasoning);
-      const modelInfo = isQoderCNMode(mode) ? getQoderCNFriendlyModelInfo(key, display) : { id: key, name: display };
+      const thinkingLevelMap = deriveQoderThinkingLevelMap(entry, isReasoning);
+      let modelInfo = isQoderCNMode(mode)
+        ? getQoderCNFriendlyModelInfo(key, display)
+        : { id: display || key, name: display || key };
+      if (usedListIds.has(modelInfo.id) && modelInfo.id !== key) {
+        modelInfo = { ...modelInfo, id: `${modelInfo.id} (${key})` };
+      }
+      usedListIds.add(modelInfo.id);
 
       configs[key] = entry;
       if (modelInfo.id !== key) configs[modelInfo.id] = entry;
@@ -581,6 +554,7 @@ export async function updateQoderModelsCache(
         reasoning: isReasoning,
         supportsEffort,
         thinking,
+        thinkingLevelMap,
         input: isVL ? ["text", "image"] : ["text"],
         cost: ZERO_COST,
         contextWindow: ctxLen,
@@ -607,13 +581,27 @@ export async function updateQoderModelsCache(
       });
     }
 
+    // Keep prior host ids that pointed at the same wire key so old sessions still resolve.
+    const cachePath = getQoderCachePath(mode);
+    if (existsSync(cachePath)) {
+      try {
+        const previous = JSON.parse(readFileSync(cachePath, "utf8")) as {
+          configs?: Record<string, QoderModelEntry>;
+        };
+        for (const [previousId, previousEntry] of Object.entries(previous.configs || {})) {
+          const wireKey = previousEntry?.key;
+          if (!wireKey || previousId === wireKey || !configs[wireKey] || configs[previousId]) continue;
+          configs[previousId] = configs[wireKey];
+        }
+      } catch {}
+    }
+
     const cacheData = {
       updatedAt: Date.now(),
       models: newModels,
       configs,
     };
 
-    const cachePath = getQoderCachePath(mode);
     mkdirSync(dirname(cachePath), { recursive: true });
     writeFileSync(cachePath, JSON.stringify(cacheData, null, 2), "utf-8");
   } catch {}

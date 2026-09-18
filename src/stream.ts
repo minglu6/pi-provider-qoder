@@ -23,7 +23,13 @@ import {
   logCosyRequest,
   logCosyResponse,
 } from "./cosy.js";
-import { getCachedModelConfig, type QoderModelEntry, withQoderThinkingEffort } from "./models.js";
+import {
+  getCachedModelConfig,
+  type QoderModelEntry,
+  qoderSupportsThinkingEffort,
+  resolveRequestedThinkingEffort,
+  withQoderThinkingEffort,
+} from "./models.js";
 import { resolveQoderIdentity } from "./oauth.js";
 import { qoderEncodeBody } from "./qoder-encoding.js";
 import { ThinkingTagParser } from "./thinking-parser.js";
@@ -168,24 +174,24 @@ export function streamQoder(
       const email = identity.email || getQoderUserEmailFallback(providerMode);
       const machineID = identity.machineID || getMachineId();
 
-      const qoderModel = isQoderCNMode(providerMode) ? getQoderCNDirectModel(model.id) : model.id;
+      const aliasKey = isQoderCNMode(providerMode) ? getQoderCNDirectModel(model.id) : model.id;
       const cachedConfig =
-        getCachedModelConfig(model.id, providerMode) || getCachedModelConfig(qoderModel, providerMode);
+        getCachedModelConfig(model.id, providerMode) || getCachedModelConfig(aliasKey, providerMode);
+      // Prefer the live catalog wire key over static alias tables.
+      const qoderModel = cachedConfig?.key || aliasKey;
       const fallbackConfig: QoderModelEntry = {
         key: qoderModel,
-        is_reasoning:
-          qoderModel === "ultimate" ||
-          qoderModel === "performance" ||
-          qoderModel.includes("dmodel") ||
-          qoderModel.includes("dfmodel"),
-        max_output_tokens: 32768,
+        is_reasoning: !!model.reasoning,
+        max_output_tokens: model.maxTokens || 32768,
         source: "system",
       };
-      const reasoningOption = options?.reasoning as unknown;
-      const requestedEffort = reasoningOption === "high" || reasoningOption === "max" ? reasoningOption : undefined;
-      const modelConfig = requestedEffort
-        ? withQoderThinkingEffort(cachedConfig || fallbackConfig, requestedEffort)
-        : cachedConfig || fallbackConfig;
+      const baseConfig = cachedConfig || fallbackConfig;
+      const requestedEffort = resolveRequestedThinkingEffort(options?.reasoning as unknown);
+      const appliedEffort =
+        requestedEffort && qoderSupportsThinkingEffort(baseConfig, requestedEffort)
+          ? requestedEffort
+          : undefined;
+      const modelConfig = appliedEffort ? withQoderThinkingEffort(baseConfig, appliedEffort) : baseConfig;
       modelConfig.key = qoderModel;
 
       const isReasoning = !!modelConfig.is_reasoning;
@@ -244,7 +250,7 @@ export function streamQoder(
         tools: toolsRaw || [],
         parameters: {
           max_tokens: maxTokens,
-          ...(requestedEffort ? { reasoning_effort: requestedEffort } : {}),
+          ...(appliedEffort ? { reasoning_effort: appliedEffort } : {}),
         },
         chat_context: {
           chatPrompt: "",
@@ -281,6 +287,7 @@ export function streamQoder(
             model_key: qoderModel,
             is_reasoning: modelConfig.is_reasoning,
             requested_effort: requestedEffort,
+            applied_effort: appliedEffort,
             selected_effort: selectedEffort,
             enable_thinking: modelConfig.thinking_config?.enabled?.is_default === true,
           }),

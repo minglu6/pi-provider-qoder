@@ -21,6 +21,9 @@ vi.mock("../cosy.js", () => ({
 
 vi.mock("../models.js", () => ({
   getCachedModelConfig: () => undefined,
+  resolveRequestedThinkingEffort: (reasoning: unknown) =>
+    typeof reasoning === "string" && reasoning !== "off" && reasoning.length > 0 ? reasoning : undefined,
+  qoderSupportsThinkingEffort: () => false,
   withQoderThinkingEffort: (config: unknown) => config,
 }));
 

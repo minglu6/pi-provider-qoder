@@ -36,6 +36,8 @@ vi.mock("../cosy.js", () => ({
 
 vi.mock("../models.js", () => ({
   getCachedModels: (mode: string) => (mode === "cn" ? mocks.cachedCnModels : []),
+  getCachedModelConfig: () => null,
+  deriveQoderThinkingLevelMap: () => undefined,
   isCacheStale: (mode: string) => mode === "cn",
   qoderModelIdentity: (id: string) => ({ class: id.includes("deepseek") ? "deepseek" : "unknown" }),
   staticCnModels: mocks.staticCnModels,

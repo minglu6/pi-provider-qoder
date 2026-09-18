@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { deriveQoderThinking, qoderModelIdentity, staticCnModels, staticModels, withQoderThinkingEffort, ZERO_COST } from "../models.js";
+import {
+  deriveQoderThinking,
+  deriveQoderThinkingLevelMap,
+  qoderModelIdentity,
+  resolveRequestedThinkingEffort,
+  staticCnModels,
+  staticModels,
+  withQoderThinkingEffort,
+  ZERO_COST,
+} from "../models.js";
 
 // ── staticModels ──────────────────────────────────────────────────────────
 
@@ -46,50 +55,15 @@ describe("staticModels", () => {
 // ── staticCnModels ────────────────────────────────────────────────────────
 
 describe("staticCnModels", () => {
-  it("is a non-empty array", () => {
-    expect(Array.isArray(staticCnModels)).toBe(true);
-    expect(staticCnModels.length).toBeGreaterThan(0);
-  });
-
-  it("has auto as first entry", () => {
-    expect(staticCnModels[0].id).toBe("auto");
-  });
-
-  it("every CN model has required fields", () => {
-    for (const m of staticCnModels) {
-      expect(m.id).toBeTruthy();
-      expect(m.name).toBeTruthy();
-      expect(m.api).toBe("qoder-api");
-      expect(m.provider).toBe("qoder-cn");
-      expect(m.baseUrl).toContain("qoder.com.cn");
-      expect(typeof m.reasoning).toBe("boolean");
-      expect(typeof m.supportsEffort).toBe("boolean");
-      expect(Array.isArray(m.input)).toBe(true);
-      expect(m.cost).toBe(ZERO_COST);
-      expect(m.contextWindow).toBeGreaterThan(0);
-      expect(m.maxTokens).toBeGreaterThan(0);
-    }
-  });
-
-  it("has unique IDs", () => {
-    const ids = staticCnModels.map((m) => m.id);
-    expect(new Set(ids).size).toBe(ids.length);
-  });
-
-  it("every CN model has a description", () => {
-    for (const m of staticCnModels) {
-      expect(m.description).toBeTruthy();
-    }
-  });
-
-  it("CN DeepSeek V4 models declare high/max thinking efforts", () => {
-    for (const id of ["deepseek-v4-pro", "deepseek-v4-flash"]) {
-      const m = staticCnModels.find((model) => model.id === id);
-      expect(m).toBeTruthy();
-      expect(m?.reasoning).toBe(true);
-      expect(m?.supportsEffort).toBe(true);
-      expect(m?.thinking).toEqual({ mode: "effort", efforts: ["high", "max"], defaultLevel: "max" });
-    }
+  it("is only a cold-start auto fallback; concrete models come from the live catalog", () => {
+    expect(staticCnModels).toEqual([
+      expect.objectContaining({
+        id: "auto",
+        provider: "qoder-cn",
+        api: "qoder-api",
+      }),
+    ]);
+    expect(staticCnModels).toHaveLength(1);
   });
 });
 
@@ -114,6 +88,25 @@ describe("deriveQoderThinking", () => {
     expect(thinking).toEqual({ mode: "effort", efforts: ["high", "max"], defaultLevel: "max" });
   });
 
+  it("orders known effort labels ascending", () => {
+    const thinking = deriveQoderThinking(
+      {
+        key: "qmodel",
+        thinking_config: {
+          enabled: {
+            efforts: {
+              xhigh: { is_default: true },
+              low: {},
+              medium: {},
+            },
+          },
+        },
+      },
+      true,
+    );
+    expect(thinking).toEqual({ mode: "effort", efforts: ["low", "medium", "xhigh"], defaultLevel: "xhigh" });
+  });
+
   it("returns undefined without default effort", () => {
     const thinking = deriveQoderThinking(
       {
@@ -134,6 +127,56 @@ describe("deriveQoderThinking", () => {
   it("returns undefined without an efforts surface", () => {
     expect(deriveQoderThinking({ key: "auto", thinking_config: { enabled: {} } }, true)).toBeUndefined();
     expect(deriveQoderThinking({ key: "auto" }, true)).toBeUndefined();
+  });
+});
+
+describe("deriveQoderThinkingLevelMap", () => {
+  it("marks unsupported pi levels null so sticky high is clamped away", () => {
+    const map = deriveQoderThinkingLevelMap(
+      {
+        key: "qmodel_38max",
+        thinking_config: {
+          disabled: {},
+          enabled: {
+            is_default: true,
+            efforts: {
+              xhigh: { is_default: true },
+              low: {},
+              medium: {},
+            },
+          },
+        },
+      },
+      true,
+    );
+    expect(map).toEqual({
+      off: "off",
+      minimal: null,
+      low: "low",
+      medium: "medium",
+      high: null,
+      xhigh: "xhigh",
+      max: null,
+    });
+  });
+
+  it("returns undefined without an efforts surface", () => {
+    expect(deriveQoderThinkingLevelMap({ key: "auto", thinking_config: { enabled: {} } }, true)).toBeUndefined();
+  });
+});
+
+describe("resolveRequestedThinkingEffort", () => {
+  it("accepts any non-toggle effort string from the host", () => {
+    expect(resolveRequestedThinkingEffort("high")).toBe("high");
+    expect(resolveRequestedThinkingEffort("xhigh")).toBe("xhigh");
+    expect(resolveRequestedThinkingEffort("medium")).toBe("medium");
+  });
+
+  it("ignores thinking toggles that are not effort labels", () => {
+    expect(resolveRequestedThinkingEffort(true)).toBeUndefined();
+    expect(resolveRequestedThinkingEffort(false)).toBeUndefined();
+    expect(resolveRequestedThinkingEffort("off")).toBeUndefined();
+    expect(resolveRequestedThinkingEffort("")).toBeUndefined();
   });
 });
 
@@ -162,10 +205,9 @@ describe("withQoderThinkingEffort", () => {
     expect(configured.thinking_config?.enabled?.efforts?.max?.is_default).toBe(true);
   });
 
-  it("rejects an unsupported effort", () => {
-    expect(() => withQoderThinkingEffort(entry, "ultra" as "max")).toThrow(
-      "does not support thinking effort ultra",
-    );
+  it("leaves the entry unchanged when the effort is unsupported", () => {
+    expect(withQoderThinkingEffort(entry, "ultra")).toBe(entry);
+    expect(withQoderThinkingEffort(entry, "xhigh")).toBe(entry);
   });
 });
 
