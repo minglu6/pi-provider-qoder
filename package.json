@@ -1,6 +1,6 @@
 {
   "name": "pi-qoder-provider",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Pi extension for Qoder AI — with OAuth authentication, COSY signatures and WAF bypass",
   "type": "module",
   "license": "MIT",
@@ -40,7 +40,6 @@
     "format": "node node_modules/@biomejs/biome/bin/biome format --write .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepare": "npm run build",
     "prepublishOnly": "npm run check && npm run build"
   },
   "pi": {
@@ -64,7 +63,7 @@
     "url": "https://github.com/minglu6/pi-provider-qoder/issues"
   },
   "homepage": "https://github.com/minglu6/pi-provider-qoder#readme",
-  "dependencies": {
+  "optionalDependencies": {
     "@napi-rs/keyring": "2.1.0"
   }
 }

@@ -115,6 +115,23 @@ describe("saved PAT recovery", () => {
     expect(JSON.stringify([creds, recovered])).not.toContain("pt-saved-account-a");
   });
 
+  it("recovers on Android after reloading credentials using a persisted file without a working native store", async () => {
+    const platform = Object.getOwnPropertyDescriptor(process, "platform");
+    if (!platform) throw new Error("Missing process.platform");
+    try {
+      Object.defineProperty(process, "platform", { value: "android", configurable: true });
+      store.unavailable = true;
+      const creds = await login();
+      exchangePats = [];
+      const recovered = await refreshQoderTokenCN(expire(creds));
+      expect(recovered.refresh).toBe("jrt|jrt-recovered|account-a|test-machine");
+      expect(exchangePats).toEqual(["pt-saved-account-a"]);
+      expect(JSON.stringify([creds, recovered])).not.toContain("pt-saved-account-a");
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+    }
+  });
+
   it("does not require an unlocked credential store when JRT renewal succeeds", async () => {
     const creds = await login();
     refreshStatus = 200;

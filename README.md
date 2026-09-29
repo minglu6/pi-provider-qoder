@@ -95,6 +95,21 @@ omp plugin link "$(pwd)"
 
 After `git pull`, restart OMP (and rebuild with `npm run build` if you rely on `dist/`).
 
+#### 4. Android / Termux
+
+Starting with 0.3.1, installing the source package does not run a build or require `esbuild`. Pi loads `src/index.ts` directly; `npm run build` is only needed for development or publishing.
+
+```bash
+# Pi: install from GitHub, or update the same source if already installed
+pi install git:github.com/minglu6/pi-provider-qoder
+# Existing GitHub installation:
+pi update git:github.com/minglu6/pi-provider-qoder
+```
+
+For OMP, use `omp plugin install github:minglu6/pi-provider-qoder`. Keep only one enabled copy of the provider; remove an older npm installation before switching sources. Fully restart the host, then run `/login qoder-cn` once.
+
+On native Android (`process.platform === "android"`), the provider never loads the native keyring package. PATs are stored as **plaintext** in `~/.pi/agent/qoder-pats/` (or `$PI_CODING_AGENT_DIR/qoder-pats/`), with directory permissions `0700` and file permissions `0600`. Each OpenAPI endpoint/account has a separate file; writes are atomic. Keep the agent directory inside Termux private storage, not shared `/sdcard` storage. File permissions are not encryption and do not protect against root or compromised processes running as the same user.
+
 ### Login
 
 Global / international edition:
@@ -128,15 +143,15 @@ A Qoder PAT (`pt-...`) cannot authenticate API calls directly — the provider e
 - Or set `QODERCN_PERSONAL_ACCESS_TOKEN` (or `QODERCN_PAT`) before starting pi, then run `/login qoder-cn`.
 - `QODER_API_KEY` is accepted as a CN PAT alias **only** when the value starts with `pt-`.
 
-After successful login, the PAT is saved in **macOS Keychain / Windows Credential Manager / Linux Secret Service**, scoped by OpenAPI endpoint and account. Host credentials (`auth.json`) still contain only short-lived tokens and the JRT, never the plaintext PAT.
+After successful login, the PAT is saved in **macOS Keychain / Windows Credential Manager / Linux Secret Service**, or **private plaintext files on Android/Termux** as described above, scoped by OpenAPI endpoint and account. Host credentials (`auth.json`) still contain only short-lived tokens and the JRT, never the plaintext PAT.
 
 - Normal renewal uses `POST /api/v1/jobToken/refresh`. If the JRT is explicitly rejected or expired, the provider automatically exchanges the saved PAT. No PAT environment variable is needed.
 - Network failures, rate limits and server 5xx errors are propagated without PAT exchange or a misleading re-login instruction. If the server rejects the PAT itself, run `/login` again with a valid PAT.
-- Existing JRT-only sessions need one more login after upgrading and restarting Pi to save the PAT. Legacy credentials embedding a PAT migrate it into the system store after successful renewal.
-- The system credential store must be available and unlocked. Linux requires a persistent Secret Service (such as GNOME Keyring / KWallet); there is no fallback to reboot-volatile kernel keyrings or plaintext files. Login fails explicitly if the PAT cannot be saved.
-- `/logout` removes the host session but does not remove the saved PAT: Pi exposes no provider logout callback. The provider does not automatically create a new login from the saved PAT alone. To remove it completely, delete the system credential entry with service `pi-qoder-provider:<OpenAPI URL>` and the relevant userID as account; revoke the PAT in Qoder to invalidate access.
+- Existing JRT-only sessions need one more login after upgrading and restarting Pi to save the PAT. Legacy credentials embedding a PAT migrate it into the platform-appropriate store after successful renewal.
+- On desktop/server platforms, the system credential store must be available and unlocked. Install optional dependencies; Linux requires a persistent Secret Service (such as GNOME Keyring / KWallet). A missing or locked native store never silently falls back to plaintext files. Android deliberately uses the file store instead. Login fails explicitly if the PAT cannot be saved.
+- `/logout` removes the host session but does not remove the saved PAT: Pi exposes no provider logout callback. The provider does not automatically create a new login from the saved PAT alone. To remove it completely, delete the system credential entry with service `pi-qoder-provider:<OpenAPI URL>` and the relevant userID as account. On Android, removing `qoder-pats/` deletes saved PATs for all accounts in that agent directory. Revoke the PAT in Qoder to invalidate access.
 
-**Both the PAT and enterprise VPC configuration can be saved through one interactive login, without any Qoder environment variables.** The PAT goes into the system credential store; the non-secret instance configuration goes into a local file.
+**Both the PAT and enterprise VPC configuration can be saved through one interactive login, without any Qoder environment variables.** The PAT uses the platform-appropriate store; the non-secret instance configuration goes into a separate local file.
 
 ### Region environment variables
 

@@ -95,6 +95,21 @@ omp plugin link "$(pwd)"
 
 `git pull` 之后请重启 OMP；若依赖 `dist/`，再执行 `npm run build`。
 
+#### 4. Android / Termux
+
+从 0.3.1 开始，安装源码包不再自动构建，也不需要安装 `esbuild`。Pi 直接加载 `src/index.ts`；仅开发或发布时才需要执行 `npm run build`。
+
+```bash
+# Pi：从 GitHub 安装；已有相同来源时使用下方更新命令
+pi install git:github.com/minglu6/pi-provider-qoder
+# 已有 GitHub 安装：
+pi update git:github.com/minglu6/pi-provider-qoder
+```
+
+OMP 使用 `omp plugin install github:minglu6/pi-provider-qoder`。只保留一份启用的插件；从 npm 切换来源前先移除旧副本。完全退出并重启宿主，再执行一次 `/login qoder-cn`。
+
+原生 Android（`process.platform === "android"`）不会加载原生 keyring 包。PAT 以**明文**保存到 `~/.pi/agent/qoder-pats/`（设置 `PI_CODING_AGENT_DIR` 时为该目录下的 `qoder-pats/`），目录权限 `0700`、文件权限 `0600`。按 OpenAPI 地址和账号分别保存，采用原子写入。必须放在 Termux 私有目录，不要放在共享 `/sdcard`。文件权限不等于加密，不能防御 root 或同一用户下的恶意进程。
+
 ### 登录
 
 国际版：
@@ -128,15 +143,15 @@ Qoder PAT（`pt-...`）不能直接调 API。本扩展会把它兑换成短期 j
 - 或启动 pi 前设置 `QODERCN_PERSONAL_ACCESS_TOKEN`（或 `QODERCN_PAT`），再执行 `/login qoder-cn`
 - 仅当值以 `pt-` 开头时，`QODER_API_KEY` 才会被当作 CN PAT 别名
 
-登录成功后，PAT 自动保存在 **macOS 钥匙串 / Windows 凭据管理器 / Linux Secret Service**，按 OpenAPI 地址和账号隔离；`auth.json` 仍只保存短期令牌和 JRT，不保存明文 PAT。
+登录成功后，PAT 自动保存在 **macOS 钥匙串 / Windows 凭据管理器 / Linux Secret Service**；**Android/Termux 使用上述私有明文文件**。各平台均按 OpenAPI 地址和账号隔离；`auth.json` 仍只保存短期令牌和 JRT，不保存明文 PAT。
 
 - 日常使用优先通过 `POST /api/v1/jobToken/refresh` 续期。JRT 明确过期或失效后，自动读取已保存的 PAT 重新兑换，不需要配置 PAT 环境变量。
 - 网络异常、限流和服务端 5xx 保留错误，不会自动改用 PAT，也不会一律要求重新登录。PAT 本身被服务端拒绝后，才需重新 `/login` 更新密钥。
-- 升级前的 JRT-only 登录没有保存 PAT：升级并重启 Pi 后，需要再登录一次。旧版曾内嵌 PAT 的凭据会在成功续期时迁移到系统凭据库。
-- 系统凭据库必须可用且已解锁；Linux 需要持久化 Secret Service（如 GNOME Keyring / KWallet），不会降级为重启即丢失的内存 keyring 或明文文件。保存失败会明确报错，不会声称登录已完成。
-- `/logout` 删除宿主登录状态，但 Pi 的插件接口没有退出登录回调，因此不会删除系统凭据库中保存的 PAT；插件不会仅凭该 PAT 自动重新登录。彻底移除时，在系统凭据管理器中删除服务名为 `pi-qoder-provider:<OpenAPI 地址>`、账号为对应 userID 的条目；需要吊销访问权限时，在 Qoder 控制台撤销 PAT。
+- 升级前的 JRT-only 登录没有保存 PAT：升级并重启 Pi 后，需要再登录一次。旧版曾内嵌 PAT 的凭据会在成功续期时迁移到当前平台的凭据存储。
+- 桌面/服务器平台需要安装可选依赖，并确保系统凭据库可用且已解锁；Linux 需要持久化 Secret Service（如 GNOME Keyring / KWallet）。原生库缺失或凭据库锁定时不会静默降级为明文文件；Android 明确使用文件存储。保存失败会报错，不会声称登录已完成。
+- `/logout` 删除宿主登录状态，但 Pi 的插件接口没有退出登录回调，因此不会删除已保存的 PAT；插件不会仅凭该 PAT 自动重新登录。彻底移除时，在系统凭据管理器中删除服务名为 `pi-qoder-provider:<OpenAPI 地址>`、账号为对应 userID 的条目；Android 上删除 `qoder-pats/` 会清除该 agent 目录下所有账号保存的 PAT。需要吊销访问权限时，在 Qoder 控制台撤销 PAT。
 
-**PAT 和企业 VPC 配置均可通过一次交互登录保存，无需任何 Qoder 环境变量。** PAT 存系统凭据库，非敏感实例配置存本地文件。
+**PAT 和企业 VPC 配置均可通过一次交互登录保存，无需任何 Qoder 环境变量。** PAT 使用当前平台对应的存储，非敏感实例配置另存本地文件。
 
 ### 区域环境变量
 

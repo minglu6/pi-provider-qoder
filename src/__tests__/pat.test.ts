@@ -16,6 +16,7 @@ import {
 
 // Authentication regressions must never write test PATs into the real OS store.
 vi.mock("../pat-store.js", () => ({
+  getQoderPatStorageDescription: () => "the test credential store",
   saveQoderPat: vi.fn(),
   loadQoderPat: vi.fn(),
 }));

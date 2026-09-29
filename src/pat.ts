@@ -288,7 +288,7 @@ export async function fetchUserInfo(jobToken: string, mode: string): Promise<Qod
 /**
  * Build full Qoder credentials from a Personal Access Token.
  * Exchanges the PAT for a job token + job refresh token, resolves identity, and
- * stores the PAT in the system credential store, scoped by endpoint and account.
+ * stores the PAT in platform-appropriate storage, scoped by endpoint and account.
  * Host credentials contain ONLY the jrt (+ identity), never the plaintext PAT.
  *
  * Fails if userinfo does not return a non-empty userID — otherwise login would

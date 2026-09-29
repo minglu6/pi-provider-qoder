@@ -22,7 +22,7 @@ import {
   QoderTokenError,
   refreshJobToken,
 } from "./pat.js";
-import { loadQoderPat, saveQoderPat } from "./pat-store.js";
+import { getQoderPatStorageDescription, loadQoderPat, saveQoderPat } from "./pat-store.js";
 import { loginWithQoderVPC } from "./vpc.js";
 
 export interface QoderCredentials extends OAuthCredentials {
@@ -200,6 +200,7 @@ function providerIDForMode(mode: string): string {
 
 async function loginQoderForMode(callbacks: OAuthLoginCallbacks, mode: string): Promise<OAuthCredentials> {
   const authenticate = async (): Promise<OAuthCredentials> => {
+    callbacks.onProgress?.(`PAT login saves the token in ${getQoderPatStorageDescription()} for automatic renewal.`);
     const pat = isQoderCNMode(mode)
       ? getQoderCNPat()
       : process.env.QODER_PERSONAL_ACCESS_TOKEN || process.env.QODER_PAT;
@@ -242,7 +243,7 @@ export async function refreshQoderTokenCN(credentials: OAuthCredentials): Promis
 }
 
 async function refreshQoderTokenForMode(credentials: OAuthCredentials, mode: string): Promise<OAuthCredentials> {
-  // Job-token credentials: refresh via JRT, recover via the system-stored PAT.
+  // Job-token credentials: refresh via JRT, recover via the saved PAT.
   if (isPatRefresh(credentials.refresh)) {
     const decoded = decodePatRefresh(credentials.refresh);
     const prev = credentials as Partial<QoderCredentials>;
@@ -300,7 +301,7 @@ async function refreshQoderTokenForMode(credentials: OAuthCredentials, mode: str
     if (!pat) {
       throw new Error(
         `${providerLabel} has no saved PAT for automatic recovery. Run "/login ${providerIDForMode(mode)}" once ` +
-          "to save it in the system credential store; no PAT environment variable is required.",
+          `to save it in ${getQoderPatStorageDescription()}; no PAT environment variable is required.`,
       );
     }
     try {

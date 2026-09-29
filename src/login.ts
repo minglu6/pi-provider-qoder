@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
 import { getMachineId, getQoderIntegrationsUrl, getQoderMode, isQoderCNMode } from "./cosy.js";
 import { credentialsFromPat } from "./pat.js";
+import { getQoderPatStorageDescription } from "./pat-store.js";
 
 type PromptFn = (p: { message: string; placeholder?: string; allowEmpty?: boolean }) => Promise<string>;
 
@@ -47,8 +48,8 @@ export async function interactiveLogin(
   const prompt = getPrompt(callbacks);
   const pat = await prompt({
     message: isQoderCNMode(mode)
-      ? "Paste a Qoder CN PAT (saved in the system credential store for automatic renewal), or leave empty to cancel"
-      : "Paste a Qoder PAT (saved in the system credential store), or leave empty for browser login",
+      ? `Paste a Qoder CN PAT (saved in ${getQoderPatStorageDescription()} for automatic renewal), or leave empty to cancel`
+      : `Paste a Qoder PAT (saved in ${getQoderPatStorageDescription()}), or leave empty for browser login`,
     placeholder: "pt-...",
     allowEmpty: true,
   });
@@ -92,7 +93,7 @@ async function patLogin(
   }
   getProgress(callbacks)?.("Exchanging access token...");
   const creds = await credentialsFromPat(pat, mode);
-  getProgress(callbacks)?.("PAT validated and saved in the system credential store for automatic renewal.");
+  getProgress(callbacks)?.(`PAT validated and saved in ${getQoderPatStorageDescription()} for automatic renewal.`);
   return creds;
 }
 
