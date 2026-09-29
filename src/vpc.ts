@@ -40,13 +40,15 @@ function parseQoderVPCInstance(value?: string): string | undefined {
 }
 
 function environmentEndpoint(): string | undefined {
-  return process.env.QODER_VPC_INSTANCE ||
+  return (
+    process.env.QODER_VPC_INSTANCE ||
     process.env.QODER_VPC_ENDPOINT ||
     process.env.QODERCN_VPC_ENDPOINT ||
     process.env.QODERCN_CLI_VPC_ENDPOINT ||
     process.env.QODER_CN_BASE_URL ||
     process.env.QODER_CN_OPENAPI_URL ||
-    process.env.QODER_CN_CENTER_URL;
+    process.env.QODER_CN_CENTER_URL
+  );
 }
 
 function readConfig(): VPCConfig {
@@ -56,9 +58,11 @@ function readConfig(): VPCConfig {
   if (existsSync(path)) {
     try {
       const data = JSON.parse(readFileSync(path, "utf8")) as VPCConfig;
-      if (data.vpcInstance !== null && (
-        typeof data.vpcInstance !== "string" || parseQoderVPCInstance(data.vpcInstance) !== data.vpcInstance
-      )) throw new Error("Invalid VPC instance");
+      if (
+        data.vpcInstance !== null &&
+        (typeof data.vpcInstance !== "string" || parseQoderVPCInstance(data.vpcInstance) !== data.vpcInstance)
+      )
+        throw new Error("Invalid VPC instance");
       config = { vpcInstance: data.vpcInstance };
     } catch {
       // Never silently route an existing tenant's credentials to the public cloud.
@@ -78,7 +82,9 @@ function saveConfig(config: VPCConfig): void {
     renameSync(temporary, path);
     savedConfig = { path, config };
   } catch {
-    throw new Error(`Could not save Qoder CN routing configuration: ${path}. Check directory permissions and retry login.`);
+    throw new Error(
+      `Could not save Qoder CN routing configuration: ${path}. Check directory permissions and retry login.`,
+    );
   } finally {
     rmSync(temporary, { force: true });
   }
@@ -108,13 +114,15 @@ export async function loginWithQoderVPC<T>(callbacks: OAuthLoginCallbacks, login
   const previous = readConfig();
   let selected: VPCConfig;
   for (;;) {
-    const answer = (await callbacks.onPrompt({
-      message: previous.vpcInstance
-        ? `Qoder CN VPC instance or URL (current: ${previous.vpcInstance}). Enter to keep; type public for China public cloud`
-        : "Qoder CN enterprise VPC instance or URL; leave empty for China public cloud",
-      placeholder: previous.vpcInstance || "tenant-name / https://tenant-name.vpc.qoder.com.cn",
-      allowEmpty: true,
-    })).trim();
+    const answer = (
+      await callbacks.onPrompt({
+        message: previous.vpcInstance
+          ? `Qoder CN VPC instance or URL (current: ${previous.vpcInstance}). Enter to keep; type public for China public cloud`
+          : "Qoder CN enterprise VPC instance or URL; leave empty for China public cloud",
+        placeholder: previous.vpcInstance || "tenant-name / https://tenant-name.vpc.qoder.com.cn",
+        allowEmpty: true,
+      })
+    ).trim();
     if (callbacks.signal?.aborted) throw new Error("Login cancelled");
     if (!answer) {
       selected = previous;

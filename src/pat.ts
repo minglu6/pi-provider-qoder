@@ -36,18 +36,28 @@ export interface PatExchangeResult {
 export class QoderTokenError extends Error {
   readonly requiresReauthentication: boolean;
 
-  constructor(operation: "exchange" | "refresh", status: number, statusText: string, body: string, url: string, secret: string) {
+  constructor(
+    operation: "exchange" | "refresh",
+    status: number,
+    statusText: string,
+    body: string,
+    url: string,
+    secret: string,
+  ) {
     const safeBody = body
-      .split(secret).join("[redacted]")
-      .replace(/\b(?:pt|jt|jrt)-[A-Za-z0-9._~+\/=-]+/g, "[redacted]");
-    super(operation === "exchange"
-      ? formatQoderHttpError("pat-exchange", status, statusText, safeBody, url)
-      : `Qoder job token refresh failed: ${status} ${statusText}. Response: ${safeBody.replace(/\s+/g, " ").slice(0, 200)}`);
-    this.name = "QoderTokenError";
-    this.requiresReauthentication = status === 401 || (
-      (status === 400 || status === 403) &&
-      /\b(?:ExpiredTokenError|InvalidTokenError|InvalidRefreshTokenError|TOKEN_EXPIRED?)\b/.test(body)
+      .split(secret)
+      .join("[redacted]")
+      .replace(/\b(?:pt|jt|jrt)-[A-Za-z0-9._~+/=-]+/g, "[redacted]");
+    super(
+      operation === "exchange"
+        ? formatQoderHttpError("pat-exchange", status, statusText, safeBody, url)
+        : `Qoder job token refresh failed: ${status} ${statusText}. Response: ${safeBody.replace(/\s+/g, " ").slice(0, 200)}`,
     );
+    this.name = "QoderTokenError";
+    this.requiresReauthentication =
+      status === 401 ||
+      ((status === 400 || status === 403) &&
+        /\b(?:ExpiredTokenError|InvalidTokenError|InvalidRefreshTokenError|TOKEN_EXPIRED?)\b/.test(body));
   }
 }
 
@@ -58,9 +68,7 @@ export interface QoderUserInfo {
 }
 
 export function isPatRefresh(refresh: string): boolean {
-  return (
-    refresh.startsWith(`${JRT_REFRESH_PREFIX}|`) || refresh.startsWith(`${PAT_REFRESH_PREFIX}|`)
-  );
+  return refresh.startsWith(`${JRT_REFRESH_PREFIX}|`) || refresh.startsWith(`${PAT_REFRESH_PREFIX}|`);
 }
 
 /** Encode job-token refresh WITHOUT embedding the plaintext PAT. */
@@ -203,7 +211,12 @@ export async function refreshJobToken(
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new QoderTokenError(
-      "refresh", res.status, res.statusText, text, getQoderJobTokenRefreshURL(mode), jobRefreshToken,
+      "refresh",
+      res.status,
+      res.statusText,
+      text,
+      getQoderJobTokenRefreshURL(mode),
+      jobRefreshToken,
     );
   }
 

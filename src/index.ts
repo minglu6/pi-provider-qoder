@@ -7,7 +7,16 @@ import {
   isQoderCNMode,
   toQoderCNFriendlyModel,
 } from "./cosy.js";
-import { getCachedModels, getCachedModelConfig, isCacheStale, qoderModelIdentity, deriveQoderThinkingLevelMap, staticCnModels, staticModels, updateQoderModelsCache } from "./models.js";
+import {
+  deriveQoderThinkingLevelMap,
+  getCachedModelConfig,
+  getCachedModels,
+  isCacheStale,
+  qoderModelIdentity,
+  staticCnModels,
+  staticModels,
+  updateQoderModelsCache,
+} from "./models.js";
 import { loginQoder, loginQoderCN, refreshQoderToken, refreshQoderTokenCN, resolveQoderIdentity } from "./oauth.js";
 import { streamQoder } from "./stream.js";
 import { fetchQoderUsage, fetchQoderUsageCN } from "./usage.js";
@@ -66,7 +75,10 @@ function createQoderOAuth(providerID: string, mode: string): OAuthConfigWithUsag
 // ModelRegistry requires apiKey or oauth whenever models are present, including
 // re-registration after a cache refresh. Always include oauth so session_start
 // can publish an updated model list without failing validation.
-function modelConfigForProvider(mode: string, providerID: string): Pick<ProviderConfig, "api" | "baseUrl" | "models" | "oauth"> {
+function modelConfigForProvider(
+  mode: string,
+  providerID: string,
+): Pick<ProviderConfig, "api" | "baseUrl" | "models" | "oauth"> {
   return {
     baseUrl: getQoderBaseUrl(mode),
     api: "qoder-api" as Api,

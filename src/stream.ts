@@ -175,8 +175,7 @@ export function streamQoder(
       const machineID = identity.machineID || getMachineId();
 
       const aliasKey = isQoderCNMode(providerMode) ? getQoderCNDirectModel(model.id) : model.id;
-      const cachedConfig =
-        getCachedModelConfig(model.id, providerMode) || getCachedModelConfig(aliasKey, providerMode);
+      const cachedConfig = getCachedModelConfig(model.id, providerMode) || getCachedModelConfig(aliasKey, providerMode);
       // Prefer the live catalog wire key over static alias tables.
       const qoderModel = cachedConfig?.key || aliasKey;
       const fallbackConfig: QoderModelEntry = {
@@ -188,9 +187,7 @@ export function streamQoder(
       const baseConfig = cachedConfig || fallbackConfig;
       const requestedEffort = resolveRequestedThinkingEffort(options?.reasoning as unknown);
       const appliedEffort =
-        requestedEffort && qoderSupportsThinkingEffort(baseConfig, requestedEffort)
-          ? requestedEffort
-          : undefined;
+        requestedEffort && qoderSupportsThinkingEffort(baseConfig, requestedEffort) ? requestedEffort : undefined;
       const modelConfig = appliedEffort ? withQoderThinkingEffort(baseConfig, appliedEffort) : baseConfig;
       modelConfig.key = qoderModel;
 

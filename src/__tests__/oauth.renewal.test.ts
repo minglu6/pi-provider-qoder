@@ -42,10 +42,19 @@ let requestURLs: string[];
 
 beforeEach(() => {
   for (const key of [
-    "QODERCN_PERSONAL_ACCESS_TOKEN", "QODERCN_PAT", "QODER_API_KEY", "QODER_PERSONAL_ACCESS_TOKEN", "QODER_PAT",
-    "QODER_CN_BASE_URL", "QODER_CN_OPENAPI_URL", "QODER_CN_CENTER_URL", "QODER_VPC_ENDPOINT",
-    "QODERCN_VPC_ENDPOINT", "QODERCN_CLI_VPC_ENDPOINT",
-  ]) vi.stubEnv(key, "");
+    "QODERCN_PERSONAL_ACCESS_TOKEN",
+    "QODERCN_PAT",
+    "QODER_API_KEY",
+    "QODER_PERSONAL_ACCESS_TOKEN",
+    "QODER_PAT",
+    "QODER_CN_BASE_URL",
+    "QODER_CN_OPENAPI_URL",
+    "QODER_CN_CENTER_URL",
+    "QODER_VPC_ENDPOINT",
+    "QODERCN_VPC_ENDPOINT",
+    "QODERCN_CLI_VPC_ENDPOINT",
+  ])
+    vi.stubEnv(key, "");
   vi.stubEnv("QODER_VPC_INSTANCE", "renewal-test");
   vi.spyOn(cosy, "getMachineId").mockReturnValue("test-machine");
   store.passwords.clear();
@@ -58,22 +67,25 @@ beforeEach(() => {
   failNetwork = false;
   exchangePats = [];
   requestURLs = [];
-  vi.stubGlobal("fetch", vi.fn(async (url: string, init: RequestInit) => {
-    requestURLs.push(url);
-    const path = new URL(url).pathname;
-    if (path.endsWith("/jobToken/refresh")) {
-      if (failNetwork) throw new TypeError("fetch failed");
-      if (refreshStatus !== 200) return new Response(refreshBody, { status: refreshStatus });
-      return Response.json({ token: "jt-renewed", refresh_token: "jrt-rotated", expires_in: 86_400_000 });
-    }
-    if (path.endsWith("/jobToken/exchange")) {
-      exchangePats.push(JSON.parse(init.body as string).personal_token);
-      if (exchangeStatus !== 200) return new Response("ExpiredTokenError", { status: exchangeStatus });
-      return Response.json({ token: "jt-recovered", refresh_token: "jrt-recovered", expires_in: 86_400_000 });
-    }
-    if (path.endsWith("/userinfo")) return Response.json({ id: exchangeAccount });
-    throw new Error(`Unexpected endpoint: ${path}`);
-  }));
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string, init: RequestInit) => {
+      requestURLs.push(url);
+      const path = new URL(url).pathname;
+      if (path.endsWith("/jobToken/refresh")) {
+        if (failNetwork) throw new TypeError("fetch failed");
+        if (refreshStatus !== 200) return new Response(refreshBody, { status: refreshStatus });
+        return Response.json({ token: "jt-renewed", refresh_token: "jrt-rotated", expires_in: 86_400_000 });
+      }
+      if (path.endsWith("/jobToken/exchange")) {
+        exchangePats.push(JSON.parse(init.body as string).personal_token);
+        if (exchangeStatus !== 200) return new Response("ExpiredTokenError", { status: exchangeStatus });
+        return Response.json({ token: "jt-recovered", refresh_token: "jrt-recovered", expires_in: 86_400_000 });
+      }
+      if (path.endsWith("/userinfo")) return Response.json({ id: exchangeAccount });
+      throw new Error(`Unexpected endpoint: ${path}`);
+    }),
+  );
 });
 
 afterEach(() => {
@@ -158,7 +170,9 @@ describe("saved PAT recovery", () => {
   it("does not reuse a different account's PAT on the same tenant", async () => {
     await login();
     exchangePats = [];
-    await expect(refreshQoderTokenCN({ access: "jt-b", refresh: "jrt|jrt-b|account-b|machine-b", expires: 0 })).rejects.toThrow();
+    await expect(
+      refreshQoderTokenCN({ access: "jt-b", refresh: "jrt|jrt-b|account-b|machine-b", expires: 0 }),
+    ).rejects.toThrow();
     expect(exchangePats).toEqual([]);
   });
 
@@ -222,7 +236,9 @@ describe("saved PAT recovery", () => {
   it("migrates an embedded legacy PAT before dropping it from host credentials", async () => {
     refreshStatus = 200;
     const migrated = await refreshQoderTokenCN({
-      access: "jt-old", refresh: "pat|pt-legacy|jrt-old|account-a|old-machine", expires: 0,
+      access: "jt-old",
+      refresh: "pat|pt-legacy|jrt-old|account-a|old-machine",
+      expires: 0,
     });
     expect(JSON.stringify(migrated)).not.toContain("pt-legacy");
     refreshStatus = 401;
@@ -284,8 +300,9 @@ describe("interactive VPC routing", () => {
     expect(cosy.getQoderOpenApiUrl("cn")).toBe("https://openapi.qoder.com.cn");
     expect(cosy.getQoderBaseUrl("cn")).toBe("https://gateway.qoder.com.cn/");
     expect(new Set(requestURLs.map((url) => new URL(url).host))).toEqual(new Set(["openapi.qoder.com.cn"]));
-    expect(JSON.parse(readFileSync(join(process.env.PI_CODING_AGENT_DIR!, "qoder-cn-config.json"), "utf8")))
-      .toEqual({ vpcInstance: null });
+    expect(JSON.parse(readFileSync(join(process.env.PI_CODING_AGENT_DIR!, "qoder-cn-config.json"), "utf8"))).toEqual({
+      vpcInstance: null,
+    });
   });
 
   it("does not persist a new route or redirect the existing session when authentication fails", async () => {
@@ -311,13 +328,15 @@ describe("interactive VPC routing", () => {
   it("cancels route selection without network requests or saved configuration", async () => {
     vi.stubEnv("QODER_VPC_INSTANCE", "");
     const controller = new AbortController();
-    await expect(loginQoderCN({
-      signal: controller.signal,
-      onPrompt: async () => {
-        controller.abort();
-        return "cancelled-tenant";
-      },
-    } as unknown as OAuthLoginCallbacks)).rejects.toThrow();
+    await expect(
+      loginQoderCN({
+        signal: controller.signal,
+        onPrompt: async () => {
+          controller.abort();
+          return "cancelled-tenant";
+        },
+      } as unknown as OAuthLoginCallbacks),
+    ).rejects.toThrow();
     expect(requestURLs).toEqual([]);
     expect(existsSync(join(process.env.PI_CODING_AGENT_DIR!, "qoder-cn-config.json"))).toBe(false);
   });
@@ -336,8 +355,12 @@ describe("interactive VPC routing", () => {
     vi.stubEnv("QODER_VPC_INSTANCE", "");
     let submitPat!: (pat: string) => void;
     let notifyPrompt!: () => void;
-    const pat = new Promise<string>((resolve) => { submitPat = resolve; });
-    const prompted = new Promise<void>((resolve) => { notifyPrompt = resolve; });
+    const pat = new Promise<string>((resolve) => {
+      submitPat = resolve;
+    });
+    const prompted = new Promise<void>((resolve) => {
+      notifyPrompt = resolve;
+    });
     let prompts = 0;
     const pending = loginQoderCN({
       onPrompt: async () => {

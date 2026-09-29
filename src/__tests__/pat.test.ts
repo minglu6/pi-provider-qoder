@@ -2,6 +2,8 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { getQoderJobTokenRefreshURL } from "../cosy.js";
+import { refreshQoderTokenCN } from "../oauth.js";
 import {
   credentialsFromPat,
   decodePatRefresh,
@@ -11,8 +13,6 @@ import {
   isPatRefresh,
   refreshJobToken,
 } from "../pat.js";
-import { getQoderJobTokenRefreshURL } from "../cosy.js";
-import { refreshQoderTokenCN } from "../oauth.js";
 
 // Authentication regressions must never write test PATs into the real OS store.
 vi.mock("../pat-store.js", () => ({
@@ -42,7 +42,6 @@ function loadJobTokenRefreshSuccessFixture() {
     refresh_token_expires_in: number;
   };
 }
-
 
 beforeEach(() => {
   for (const name of endpointEnvNames) delete process.env[name];
@@ -132,7 +131,6 @@ describe("encodeJobRefresh / decodePatRefresh", () => {
   });
 });
 
-
 describe("exchangeJobToken", () => {
   it("matches the official CLI VPC exchange payload", async () => {
     process.env.QODER_VPC_INSTANCE = "example-tenant";
@@ -157,7 +155,6 @@ describe("exchangeJobToken", () => {
     expect(JSON.parse(init.body as string)).not.toHaveProperty("open_access_token");
   });
 });
-
 
 describe("credentialsFromPat", () => {
   it("fails fast when userinfo returns empty userID", async () => {
@@ -314,9 +311,11 @@ describe("jobToken refresh success contract (live VPC fixture)", () => {
     vi.useFakeTimers();
     vi.setSystemTime(createdAt);
     try {
-      const fetchMock = vi.fn().mockResolvedValue(
-        new Response(JSON.stringify(fixture), { status: 200, headers: { "Content-Type": "application/json" } }),
-      );
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue(
+          new Response(JSON.stringify(fixture), { status: 200, headers: { "Content-Type": "application/json" } }),
+        );
       vi.stubGlobal("fetch", fetchMock);
 
       const result = await refreshJobToken("jrt-request-old", "cn");
@@ -343,9 +342,11 @@ describe("jobToken refresh success contract (live VPC fixture)", () => {
     vi.useFakeTimers();
     vi.setSystemTime(Date.parse(fixture.created_at));
     try {
-      const fetchMock = vi.fn().mockResolvedValue(
-        new Response(JSON.stringify(rest), { status: 200, headers: { "Content-Type": "application/json" } }),
-      );
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue(
+          new Response(JSON.stringify(rest), { status: 200, headers: { "Content-Type": "application/json" } }),
+        );
       vi.stubGlobal("fetch", fetchMock);
       const result = await refreshJobToken("jrt-old", "cn");
       expect(result.expiresAt).toBe(Date.now() + rest.expires_in);

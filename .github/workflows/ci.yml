@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   build:
-    name: Lint, typecheck & build
+    name: Lint, typecheck, test & build
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -20,7 +20,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
 
       - name: Install dependencies
@@ -31,6 +31,9 @@ jobs:
 
       - name: Type check
         run: npm run check
+
+      - name: Test
+        run: npm test
 
       - name: Build
         run: npm run build

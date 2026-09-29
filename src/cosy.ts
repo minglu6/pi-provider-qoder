@@ -79,7 +79,6 @@ export function getQoderCNPat(): string {
   return isQoderPatValue(apiKey) ? apiKey.trim() : "";
 }
 
-
 function getQoderVPCServiceUrl(service: "gateway" | "openapi", endpointOverride?: string): string | undefined {
   const instance = getQoderVPCInstance(endpointOverride);
   return instance ? `https://${instance}-${service}.${QoderVPCDomain}` : undefined;

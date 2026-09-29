@@ -8,8 +8,8 @@ import {
   getQoderCNFriendlyModelInfo,
   getQoderCNPat,
   getQoderExchangeURL,
-  getQoderJobTokenRefreshURL,
   getQoderIntegrationsUrl,
+  getQoderJobTokenRefreshURL,
   getQoderManageUrl,
   getQoderMode,
   getQoderModelListURL,
@@ -268,9 +268,7 @@ describe("getQoderIntegrationsUrl", () => {
 
   it("points at VPC tenant integrations when instance is set", () => {
     process.env.QODER_VPC_INSTANCE = "sungrow-of-enterprise";
-    expect(getQoderIntegrationsUrl("cn")).toBe(
-      "https://sungrow-of-enterprise.vpc.qoder.com.cn/account/integrations",
-    );
+    expect(getQoderIntegrationsUrl("cn")).toBe("https://sungrow-of-enterprise.vpc.qoder.com.cn/account/integrations");
   });
 });
 

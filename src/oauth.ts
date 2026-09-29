@@ -19,8 +19,8 @@ import {
   decodePatRefresh,
   fetchUserInfo,
   isPatRefresh,
-  refreshJobToken,
   QoderTokenError,
+  refreshJobToken,
 } from "./pat.js";
 import { loadQoderPat, saveQoderPat } from "./pat-store.js";
 import { loginWithQoderVPC } from "./vpc.js";
@@ -64,9 +64,7 @@ function clearProviderIdentityCache(providerID: string): void {
   }
 }
 
-function toQoderIdentity(
-  creds: Pick<QoderCredentials, "userID" | "email" | "name" | "machineID">,
-): QoderIdentity {
+function toQoderIdentity(creds: Pick<QoderCredentials, "userID" | "email" | "name" | "machineID">): QoderIdentity {
   return {
     userID: creds.userID,
     email: creds.email || "",
@@ -202,7 +200,9 @@ function providerIDForMode(mode: string): string {
 
 async function loginQoderForMode(callbacks: OAuthLoginCallbacks, mode: string): Promise<OAuthCredentials> {
   const authenticate = async (): Promise<OAuthCredentials> => {
-    const pat = isQoderCNMode(mode) ? getQoderCNPat() : process.env.QODER_PERSONAL_ACCESS_TOKEN || process.env.QODER_PAT;
+    const pat = isQoderCNMode(mode)
+      ? getQoderCNPat()
+      : process.env.QODER_PERSONAL_ACCESS_TOKEN || process.env.QODER_PAT;
     if (!pat) return interactiveLogin(callbacks, mode);
     try {
       return await credentialsFromPat(pat, mode);
@@ -211,9 +211,7 @@ async function loginQoderForMode(callbacks: OAuthLoginCallbacks, mode: string): 
       return interactiveLogin(callbacks, mode);
     }
   };
-  const creds = isQoderCNMode(mode)
-    ? await loginWithQoderVPC(callbacks, authenticate)
-    : await authenticate();
+  const creds = isQoderCNMode(mode) ? await loginWithQoderVPC(callbacks, authenticate) : await authenticate();
 
   try {
     const qCreds = creds as QoderCredentials;

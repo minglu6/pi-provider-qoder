@@ -29,15 +29,7 @@ export type QoderThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" |
  */
 export type QoderThinkingLevelMap = Partial<Record<QoderThinkingLevel, string | null>>;
 
-const PI_THINKING_LEVELS: readonly QoderThinkingLevel[] = [
-  "off",
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-];
+const PI_THINKING_LEVELS: readonly QoderThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 /** Shape of a single entry returned by the Qoder /model/list endpoint. */
 export interface QoderModelEntry {
@@ -401,10 +393,7 @@ export function withQoderThinkingEffort(entry: QoderModelEntry, effort: string):
     return entry;
   }
   const efforts = Object.fromEntries(
-    Object.entries(configuredEfforts).map(([name, config]) => [
-      name,
-      { ...config, is_default: name === effort },
-    ]),
+    Object.entries(configuredEfforts).map(([name, config]) => [name, { ...config, is_default: name === effort }]),
   );
   return {
     ...entry,
