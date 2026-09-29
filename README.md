@@ -277,11 +277,19 @@ src/
 ├── pat.ts              # PAT → job-token exchange + identity resolution
 ├── models.ts           # Model definitions and dynamic config cache
 ├── stream.ts           # Main streaming response handler
+├── dsml.ts             # Native DSML text → executable tool calls
 ├── transform.ts        # Message conversions (OpenAI schema mapping)
 ├── usage.ts            # Usage / quota tracking
 ├── thinking-parser.ts  # Fallback <think> tag parser
 └── qoder-encoding.ts   # WAF bypass body encoder
 ```
+
+DeepSeek-family models may emit native DSML markup in `delta.content` instead of
+structured `tool_calls`. The streaming parser converts supported DSML blocks into
+tool calls with `stopReason: "toolUse"`, preserving ordinary text and parameter
+types. It supports character-split tags and multiple invokes, and recovers complete
+parameters from a truncated invoke. Unrecognized or oversized unfinished markup
+falls back to text; existing session history is not rewritten.
 
 ## License
 
