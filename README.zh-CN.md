@@ -19,31 +19,24 @@ npm 包名：`pi-qoder-provider`（GitHub 仓库仍为 `minglu6/pi-provider-qode
    omp plugin install npm:pi-qoder-provider
 2. 完全退出并重启 OMP（不是只开新对话）。
 3. 验证：omp plugin list && omp plugin doctor
-4. 【必须】在启动 OMP/pi 的同一个 shell 里先设置环境变量。
-   不设置环境变量则无法鉴权，provider 不可用。
+4. 执行 /login。中国版登录依次输入 VPC 实例/网址和 PAT，成功后自动保存；
+   后续启动和续期不需要 PAT 或 VPC 环境变量。
 
 按场景只选一套：
 
 A) 国际版：
-   export QODER_PERSONAL_ACCESS_TOKEN=pt-...   # 或 QODER_PAT
-   然后：/login qoder   或：pi --provider qoder --model auto
+   执行 /login qoder，输入 PAT（也可选择浏览器登录）。
 
 B) 中国公有云：
-   export QODER_REGION=cn
-   export QODERCN_PERSONAL_ACCESS_TOKEN=pt-...   # 或 QODERCN_PAT
-   然后：/login qoder-cn   或：pi --provider qoder-cn --model auto
+   执行 /login qoder-cn，VPC 提示处留空（或输入 public），再输入 CN PAT。
 
 C) 中国企业 VPC（最容易漏配）：
-   export QODER_REGION=cn
-   export QODER_VPC_INSTANCE=<instance>   # 即 xxx.vpc.qoder.com.cn 里的 xxx
-   export QODERCN_PERSONAL_ACCESS_TOKEN=pt-...   # 必须是该 VPC 租户签发的 PAT
-   然后：/login qoder-cn   或：pi --provider qoder-cn --model auto
+   执行 /login qoder-cn，先输入实例名或租户网址，再输入该 VPC 租户签发的 PAT。
 
 硬性规则：
-- 不要跳过环境变量，只靠 /login 解决不了 VPC 路由。
-- 未设置 QODER_VPC_INSTANCE（或 QODERCN_VPC_ENDPOINT）时，VPC 登录/调用会失败
-  （常见 CSRFInvalid / 打到错误主机）。
-- 未设置 PAT 环境变量且未成功 /login 时，请求会报 credentials not set。
+- VPC 地址在登录时填写；插件自动推导 -gateway / -openapi，不要手工猜测公网主机。
+- 已有路由环境变量优先于保存的配置；要在登录界面修改实例，先移除这些覆盖变量。
+- 先完成 /login；PAT 环境变量仅为可选的登录输入，不是自动续期的前提。
 - 禁止把 PAT 写入 git、README 或聊天记录。
 - 中国/VPC 优先使用 provider qoder-cn，不要猜公网域名给 VPC 租户用。
 ```
@@ -118,6 +111,8 @@ omp plugin link "$(pwd)"
 
 在 CN/VPC 环境下，`/provider` 可能出现同一插件的两行：`Qoder CN (PAT)`（`qoder-cn`）与 `Qoder (CN mode / PAT)`（`qoder`）。VPC 请使用已登录的 `qoder-cn`。
 
+没有显式路由环境变量时，中国版登录先提示 VPC 实例名或网址，再提示 PAT。首次留空使用中国公有云；已有配置时回车保留，输入 `public` 切回中国公有云。只有登录成功才保存新配置，取消或失败不会切换原来的实例。
+
 ### Personal Access Token（PAT）
 
 Qoder PAT（`pt-...`）不能直接调 API。本扩展会把它兑换成短期 job token（流程对齐官方 `qodercli` / `qoderclicn`），并自动解析账号身份。
@@ -125,15 +120,23 @@ Qoder PAT（`pt-...`）不能直接调 API。本扩展会把它兑换成短期 j
 **国际版：**
 
 - 执行 `/login qoder`，选择 **Use API Key (PAT)**，粘贴 token
-- 或启动 pi 前设置 `QODER_PERSONAL_ACCESS_TOKEN`（或 `QODER_PAT`）
+- 或启动 pi 前设置 `QODER_PERSONAL_ACCESS_TOKEN`（或 `QODER_PAT`），再执行 `/login qoder`
 
 **中国版：**
 
-- 执行 `/login qoder-cn`，粘贴 CN PAT
-- 或启动 pi 前设置 `QODERCN_PERSONAL_ACCESS_TOKEN`（或 `QODERCN_PAT`）
+- 执行 `/login qoder-cn`，选择 VPC / 中国公有云后粘贴 CN PAT
+- 或启动 pi 前设置 `QODERCN_PERSONAL_ACCESS_TOKEN`（或 `QODERCN_PAT`），再执行 `/login qoder-cn`
 - 仅当值以 `pt-` 开头时，`QODER_API_KEY` 才会被当作 CN PAT 别名
 
-> 兑换得到的 job token（`jt-...`）有效期很短。登录后只持久化 **job refresh token**（`jrt-...`），**不会**保存明文 PAT。job token 过期时会调用 `POST /api/v1/jobToken/refresh`；刷新失败请重新用 PAT 登录。
+登录成功后，PAT 自动保存在 **macOS 钥匙串 / Windows 凭据管理器 / Linux Secret Service**，按 OpenAPI 地址和账号隔离；`auth.json` 仍只保存短期令牌和 JRT，不保存明文 PAT。
+
+- 日常使用优先通过 `POST /api/v1/jobToken/refresh` 续期。JRT 明确过期或失效后，自动读取已保存的 PAT 重新兑换，不需要配置 PAT 环境变量。
+- 网络异常、限流和服务端 5xx 保留错误，不会自动改用 PAT，也不会一律要求重新登录。PAT 本身被服务端拒绝后，才需重新 `/login` 更新密钥。
+- 升级前的 JRT-only 登录没有保存 PAT：升级并重启 Pi 后，需要再登录一次。旧版曾内嵌 PAT 的凭据会在成功续期时迁移到系统凭据库。
+- 系统凭据库必须可用且已解锁；Linux 需要持久化 Secret Service（如 GNOME Keyring / KWallet），不会降级为重启即丢失的内存 keyring 或明文文件。保存失败会明确报错，不会声称登录已完成。
+- `/logout` 删除宿主登录状态，但 Pi 的插件接口没有退出登录回调，因此不会删除系统凭据库中保存的 PAT；插件不会仅凭该 PAT 自动重新登录。彻底移除时，在系统凭据管理器中删除服务名为 `pi-qoder-provider:<OpenAPI 地址>`、账号为对应 userID 的条目；需要吊销访问权限时，在 Qoder 控制台撤销 PAT。
+
+**PAT 和企业 VPC 配置均可通过一次交互登录保存，无需任何 Qoder 环境变量。** PAT 存系统凭据库，非敏感实例配置存本地文件。
 
 ### 区域环境变量
 
@@ -145,18 +148,28 @@ export QODER_REGION=cn       # 或 QODER_BACKEND=cn / QODER_MODE=cn
 
 ### 企业 VPC
 
-设置 `.vpc.qoder.com.cn` 前面的实例名：
+执行 `/login qoder-cn`，在 VPC 提示处输入实例名，例如：
 
-```bash
-export QODER_VPC_INSTANCE=sungrow-of-enterprise
+```text
+sungrow-of-enterprise
 ```
+
+也可粘贴 `https://sungrow-of-enterprise.vpc.qoder.com.cn`，或对应的 `-gateway` / `-openapi` 地址。随后输入该租户的 PAT。
+
+登录成功后，归一化后的实例名写入 `~/.pi/agent/qoder-cn-config.json`（设置 `PI_CODING_AGENT_DIR` 时使用该目录），例如：
+
+```json
+{ "vpcInstance": "sungrow-of-enterprise" }
+```
+
+文件不保存 PAT。重启后会自动读取，登录、模型列表、聊天、用量查询和令牌续期共用这一配置。再次登录可修改实例；输入 `public` 会保存为中国公有云。手工编辑配置文件后需重启 Pi。退出登录不会清除这份非敏感配置。
 
 扩展会推导 Qoder VPC 所需的业务域名：
 
 - `https://<instance>-gateway.vpc.qoder.com.cn`
 - `https://<instance>-openapi.vpc.qoder.com.cn`
 
-也接受别名 `QODER_VPC_ENDPOINT`、官方 CLI 变量 `QODERCN_VPC_ENDPOINT`，以及旧写法 `QODERCN_CLI_VPC_ENDPOINT`。原有的 `QODER_CN_BASE_URL`、`QODER_CN_OPENAPI_URL`、`QODER_CN_CENTER_URL` 覆盖仍然有效；若其中是租户控制台域名，会自动归一到对应的 gateway / OpenAPI 主机。
+已有环境变量继续作为**显式覆盖**，不是必需配置：`QODER_VPC_INSTANCE`、`QODER_VPC_ENDPOINT`、`QODERCN_VPC_ENDPOINT`、`QODERCN_CLI_VPC_ENDPOINT`，以及 `QODER_CN_BASE_URL`、`QODER_CN_OPENAPI_URL`、`QODER_CN_CENTER_URL`。存在覆盖时，登录会提示使用环境配置并跳过 VPC 输入；成功登录后也会保存可识别的 VPC 实例，之后可以移除环境变量。任意自定义 API 地址仍只作为环境覆盖，不写入实例配置文件。
 
 > `<instance>.vpc.qoder.com.cn` 是租户控制台，不是 API 主机。把 PAT 兑换或 COSY 聊天打到这里会返回 `CSRFInvalid`（命中了 Web/Session 中间件）。请始终使用上面的 `-gateway` / `-openapi` 主机。
 

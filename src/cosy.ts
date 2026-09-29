@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { getQoderVPCInstance, QoderVPCDomain } from "./vpc.js";
 
 const qoderRSAPublicKey = `-----BEGIN PUBLIC KEY-----
 MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDA8iMH5c02LilrsERw9t6Pv5Nc
@@ -78,43 +79,6 @@ export function getQoderCNPat(): string {
   return isQoderPatValue(apiKey) ? apiKey.trim() : "";
 }
 
-const QoderVPCDomain = "vpc.qoder.com.cn";
-
-function parseQoderVPCInstance(value?: string): string | undefined {
-  if (!value?.trim()) return undefined;
-
-  let candidate = value.trim().toLowerCase();
-  try {
-    candidate = new URL(candidate.includes("://") ? candidate : `https://${candidate}`).hostname;
-  } catch {
-    return undefined;
-  }
-
-  const suffix = `.${QoderVPCDomain}`;
-  if (candidate.endsWith(suffix)) {
-    candidate = candidate.slice(0, -suffix.length);
-    if (candidate.endsWith("-gateway") || candidate.endsWith("-openapi")) {
-      candidate = candidate.slice(0, -8);
-    }
-  } else if (candidate.includes(".")) {
-    return undefined;
-  }
-
-  return /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(candidate) ? candidate : undefined;
-}
-
-function getQoderVPCInstance(endpointOverride?: string): string | undefined {
-  return parseQoderVPCInstance(
-    endpointOverride ||
-      process.env.QODER_VPC_INSTANCE ||
-      process.env.QODER_VPC_ENDPOINT ||
-      process.env.QODERCN_VPC_ENDPOINT ||
-      process.env.QODERCN_CLI_VPC_ENDPOINT ||
-      process.env.QODER_CN_BASE_URL ||
-      process.env.QODER_CN_OPENAPI_URL ||
-      process.env.QODER_CN_CENTER_URL,
-  );
-}
 
 function getQoderVPCServiceUrl(service: "gateway" | "openapi", endpointOverride?: string): string | undefined {
   const instance = getQoderVPCInstance(endpointOverride);

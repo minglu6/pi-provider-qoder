@@ -9,6 +9,7 @@ import {
   getQoderUserInfoURL,
   isQoderCNMode,
 } from "./cosy.js";
+import { saveQoderPat } from "./pat-store.js";
 
 const UA = "pi-provider-qoder";
 
@@ -29,6 +30,25 @@ export interface PatExchangeResult {
   /** Job refresh token (jrt-...), if returned. */
   jobRefreshToken: string;
   expiresAt: number;
+}
+
+/** Only explicit authentication failures permit PAT recovery; never network/5xx errors. */
+export class QoderTokenError extends Error {
+  readonly requiresReauthentication: boolean;
+
+  constructor(operation: "exchange" | "refresh", status: number, statusText: string, body: string, url: string, secret: string) {
+    const safeBody = body
+      .split(secret).join("[redacted]")
+      .replace(/\b(?:pt|jt|jrt)-[A-Za-z0-9._~+\/=-]+/g, "[redacted]");
+    super(operation === "exchange"
+      ? formatQoderHttpError("pat-exchange", status, statusText, safeBody, url)
+      : `Qoder job token refresh failed: ${status} ${statusText}. Response: ${safeBody.replace(/\s+/g, " ").slice(0, 200)}`);
+    this.name = "QoderTokenError";
+    this.requiresReauthentication = status === 401 || (
+      (status === 400 || status === 403) &&
+      /\b(?:ExpiredTokenError|InvalidTokenError|InvalidRefreshTokenError|TOKEN_EXPIRED?)\b/.test(body)
+    );
+  }
 }
 
 export interface QoderUserInfo {
@@ -110,7 +130,7 @@ export async function exchangeJobToken(pat: string, mode: string = getQoderMode(
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(formatQoderHttpError("pat-exchange", res.status, res.statusText, text, getQoderExchangeURL(mode)));
+    throw new QoderTokenError("exchange", res.status, res.statusText, text, getQoderExchangeURL(mode), pat);
   }
 
   const data = (await res.json()) as {
@@ -182,8 +202,8 @@ export async function refreshJobToken(
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(
-      formatQoderHttpError("pat-exchange", res.status, res.statusText, text, getQoderJobTokenRefreshURL(mode)),
+    throw new QoderTokenError(
+      "refresh", res.status, res.statusText, text, getQoderJobTokenRefreshURL(mode), jobRefreshToken,
     );
   }
 
@@ -255,13 +275,17 @@ export async function fetchUserInfo(jobToken: string, mode: string): Promise<Qod
 /**
  * Build full Qoder credentials from a Personal Access Token.
  * Exchanges the PAT for a job token + job refresh token, resolves identity, and
- * stores ONLY the jrt (+ identity) in `refresh`. The plaintext PAT is never
- * written into credentials the host will persist.
+ * stores the PAT in the system credential store, scoped by endpoint and account.
+ * Host credentials contain ONLY the jrt (+ identity), never the plaintext PAT.
  *
  * Fails if userinfo does not return a non-empty userID — otherwise login would
  * succeed while the first chat request fails with a missing-identity error.
  */
-export async function credentialsFromPat(pat: string, mode: string = getQoderMode()): Promise<OAuthCredentials> {
+export async function credentialsFromPat(
+  pat: string,
+  mode: string = getQoderMode(),
+  expectedIdentity?: { userID: string; machineID: string },
+): Promise<OAuthCredentials> {
   const { jobToken, jobRefreshToken, expiresAt } = await exchangeJobToken(pat, mode);
   const { userID, email, name } = await fetchUserInfo(jobToken, mode);
   if (!userID) {
@@ -271,6 +295,9 @@ export async function credentialsFromPat(pat: string, mode: string = getQoderMod
         : "Qoder login failed: userinfo did not return userID. Check network/PAT validity, then retry.",
     );
   }
+  if (expectedIdentity && userID !== expectedIdentity.userID) {
+    throw new Error("Qoder PAT belongs to a different account. Use an explicit login to switch accounts.");
+  }
   if (!jobRefreshToken) {
     throw new Error(
       isQoderCNMode(mode)
@@ -278,12 +305,13 @@ export async function credentialsFromPat(pat: string, mode: string = getQoderMod
         : "Qoder login failed: jobToken exchange returned no refresh_token (jrt). Cannot persist a refreshable session without embedding the PAT.",
     );
   }
-  const machineID = getMachineId();
+  const machineID = expectedIdentity?.machineID || getMachineId();
   const refresh = encodeJobRefresh(jobRefreshToken, userID, machineID);
   const refreshParts = refresh.split("|");
   if (refreshParts.some((part) => part === pat || part.startsWith("pt-"))) {
     throw new Error("Refusing to return credentials that embed a plaintext PAT in refresh");
   }
+  await saveQoderPat(pat, userID, mode);
 
   return {
     refresh,

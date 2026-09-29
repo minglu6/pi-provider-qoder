@@ -17,7 +17,7 @@ try {
     platform: "node",
     format: "esm",
     outfile: tmpfile,
-    external: ["@earendil-works/pi-ai", "@earendil-works/pi-coding-agent"],
+    external: ["@earendil-works/pi-ai", "@earendil-works/pi-coding-agent", "@napi-rs/keyring"],
   });
 } catch (err) {
   console.error(err);

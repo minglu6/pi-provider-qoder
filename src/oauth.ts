@@ -20,7 +20,10 @@ import {
   fetchUserInfo,
   isPatRefresh,
   refreshJobToken,
+  QoderTokenError,
 } from "./pat.js";
+import { loadQoderPat, saveQoderPat } from "./pat-store.js";
+import { loginWithQoderVPC } from "./vpc.js";
 
 export interface QoderCredentials extends OAuthCredentials {
   userID: string;
@@ -198,25 +201,19 @@ function providerIDForMode(mode: string): string {
 }
 
 async function loginQoderForMode(callbacks: OAuthLoginCallbacks, mode: string): Promise<OAuthCredentials> {
-  // 1. Try environment variables first (PAT). A PAT (pt-...) must be exchanged
-  //    for a short-lived job token before it can be used — credentialsFromPat
-  //    handles the exchange + identity resolution (and fails if userID is empty).
-  const pat = isQoderCNMode(mode) ? getQoderCNPat() : process.env.QODER_PERSONAL_ACCESS_TOKEN || process.env.QODER_PAT;
-  if (pat) {
+  const authenticate = async (): Promise<OAuthCredentials> => {
+    const pat = isQoderCNMode(mode) ? getQoderCNPat() : process.env.QODER_PERSONAL_ACCESS_TOKEN || process.env.QODER_PAT;
+    if (!pat) return interactiveLogin(callbacks, mode);
     try {
-      const creds = await credentialsFromPat(pat, mode);
-      const qCreds = creds as QoderCredentials;
-      rememberQoderIdentity(providerIDForMode(mode), qCreds);
-      // Host persists oauth credentials; we only keep identity in-process.
-      updateQoderModelsCache(qCreds.access, qCreds.userID, qCreds.name, qCreds.email, mode).catch(() => {});
-      return creds;
-    } catch {
-      // Fall through to interactive login if PAT exchange fails.
+      return await credentialsFromPat(pat, mode);
+    } catch (error) {
+      if (!(error instanceof QoderTokenError) || !error.requiresReauthentication) throw error;
+      return interactiveLogin(callbacks, mode);
     }
-  }
-
-  // 2. Interactive login (CN only supports PAT prompt here; global supports device flow fallback)
-  const creds = await interactiveLogin(callbacks, mode);
+  };
+  const creds = isQoderCNMode(mode)
+    ? await loginWithQoderVPC(callbacks, authenticate)
+    : await authenticate();
 
   try {
     const qCreds = creds as QoderCredentials;
@@ -225,6 +222,7 @@ async function loginQoderForMode(callbacks: OAuthLoginCallbacks, mode: string): 
       updateQoderModelsCache(qCreds.access, qCreds.userID, qCreds.name, qCreds.email, mode).catch(() => {});
     }
   } catch {}
+  callbacks.onProgress?.("Login successful!");
 
   return creds;
 }
@@ -246,7 +244,7 @@ export async function refreshQoderTokenCN(credentials: OAuthCredentials): Promis
 }
 
 async function refreshQoderTokenForMode(credentials: OAuthCredentials, mode: string): Promise<OAuthCredentials> {
-  // Job-token credentials: refresh via jrt. Never re-persist a plaintext PAT.
+  // Job-token credentials: refresh via JRT, recover via the system-stored PAT.
   if (isPatRefresh(credentials.refresh)) {
     const decoded = decodePatRefresh(credentials.refresh);
     const prev = credentials as Partial<QoderCredentials>;
@@ -275,6 +273,7 @@ async function refreshQoderTokenForMode(credentials: OAuthCredentials, mode: str
     if (decoded.jobRefreshToken) {
       try {
         const exchange = await refreshJobToken(decoded.jobRefreshToken, mode);
+        if (decoded.legacyEmbeddedPat) await saveQoderPat(decoded.pat, userID, mode);
         return finalize(
           credentialsFromJobTokens(
             exchange,
@@ -287,37 +286,36 @@ async function refreshQoderTokenForMode(credentials: OAuthCredentials, mode: str
             mode,
           ),
         );
-      } catch {
-        // Fall through to one-shot env PAT / legacy migrate.
+      } catch (error) {
+        if (!(error instanceof QoderTokenError) || !error.requiresReauthentication) throw error;
       }
     }
 
-    // 2) One-shot env PAT (not from persisted refresh).
+    // Only a rejected/missing JRT reaches this path. Prefer the saved account's PAT
+    // over environment variables so an unrelated shell credential cannot switch accounts.
+    if (!userID) throw new Error(`${providerLabel} account identity is missing. Re-login to restore it.`);
+    const savedPat = await loadQoderPat(userID, mode);
     const envPat = isQoderCNMode(mode)
       ? getQoderCNPat()
       : process.env.QODER_PERSONAL_ACCESS_TOKEN || process.env.QODER_PAT || "";
-    if (envPat) {
-      try {
-        return finalize(await credentialsFromPat(envPat, mode));
-      } catch {
-        // Fall through.
-      }
+    const pat = savedPat || envPat || decoded.pat;
+    if (!pat) {
+      throw new Error(
+        `${providerLabel} has no saved PAT for automatic recovery. Run "/login ${providerIDForMode(mode)}" once ` +
+          "to save it in the system credential store; no PAT environment variable is required.",
+      );
     }
-
-    // 3) Legacy migrate: if an old refresh still embeds a PAT, use it once to
-    //    obtain jrt-only credentials — then never write the PAT back.
-    if (decoded.legacyEmbeddedPat && decoded.pat) {
-      try {
-        return finalize(await credentialsFromPat(decoded.pat, mode));
-      } catch {
-        // Fall through to hard failure.
+    try {
+      return finalize(await credentialsFromPat(pat, mode, { userID, machineID }));
+    } catch (error) {
+      if (error instanceof QoderTokenError && error.requiresReauthentication) {
+        throw new Error(
+          `${providerLabel} PAT was rejected by the server (expired, revoked, or invalid). ` +
+            `Run "/login ${providerIDForMode(mode)}" with a valid PAT.`,
+        );
       }
+      throw error;
     }
-
-    throw new Error(
-      `${providerLabel} job token refresh failed. Re-login with "/login ${isQoderCNMode(mode) ? "qoder-cn" : "qoder"}". ` +
-        `PAT is no longer stored in refresh; set a PAT env var only for one-shot login, or paste it interactively.`,
-    );
   }
 
   const parts = credentials.refresh.split("|");

@@ -19,31 +19,24 @@ Install and enable the Qoder provider for OMP/pi:
    omp plugin install npm:pi-qoder-provider
 2. Fully quit and restart OMP (not just a new chat).
 3. Verify: omp plugin list && omp plugin doctor
-4. REQUIRED before first use — set environment variables in the shell that launches
-   OMP/pi. Without them the provider cannot authenticate and is unusable.
+4. Run /login. China login prompts for the VPC instance/URL and PAT, then saves them
+   after successful authentication. Subsequent startup and renewal need no PAT or VPC environment variables.
 
 Choose ONE profile:
 
 A) Global / international:
-   export QODER_PERSONAL_ACCESS_TOKEN=pt-...   # or QODER_PAT
-   Then: /login qoder   OR start with: pi --provider qoder --model auto
+   Run /login qoder and enter a PAT (or choose browser login).
 
 B) China public cloud:
-   export QODER_REGION=cn
-   export QODERCN_PERSONAL_ACCESS_TOKEN=pt-...   # or QODERCN_PAT
-   Then: /login qoder-cn   OR: pi --provider qoder-cn --model auto
+   Run /login qoder-cn, leave the VPC prompt empty (or enter public), then enter a CN PAT.
 
 C) China enterprise VPC (most common failure if missed):
-   export QODER_REGION=cn
-   export QODER_VPC_INSTANCE=<instance>   # the name before .vpc.qoder.com.cn
-   export QODERCN_PERSONAL_ACCESS_TOKEN=pt-...   # MUST be a VPC-tenant PAT
-   Then: /login qoder-cn   OR: pi --provider qoder-cn --model auto
+   Run /login qoder-cn, enter the instance name or tenant URL, then a PAT issued by that tenant.
 
 Hard rules:
-- Do NOT skip env vars and expect /login alone to fix VPC routing.
-- Without QODER_VPC_INSTANCE (or QODERCN_VPC_ENDPOINT), VPC login/API calls fail
-  (often CSRFInvalid / wrong host).
-- Without a PAT env var or a successful /login, requests fail with credentials not set.
+- Enter the VPC address during login; the provider derives -gateway / -openapi hosts.
+- Existing routing environment variables override saved configuration. Remove them to edit the instance during login.
+- Complete /login first. PAT environment variables are optional login inputs, not a renewal requirement.
 - Never put PAT values into git, README, or chat logs.
 - Prefer provider qoder-cn for China/VPC; do not guess public hosts for VPC tenants.
 ```
@@ -118,6 +111,8 @@ China / VPC edition:
 
 In CN/VPC environments, `/provider` may show two Qoder rows from the same plugin: `Qoder CN (PAT)` (`qoder-cn`) and `Qoder (CN mode / PAT)` (`qoder`). Use the logged-in `qoder-cn` entry for VPC.
 
+Without explicit routing environment variables, China login asks for the VPC instance/URL before the PAT. An empty first selection uses China public cloud; on later logins, Enter keeps the saved instance and `public` switches back to public cloud. New routing is saved only after successful authentication; cancellation or failure leaves the previous instance unchanged.
+
 ### Personal Access Token (PAT)
 
 A Qoder PAT (`pt-...`) cannot authenticate API calls directly — the provider exchanges it for a short-lived job token (mirroring the official `qodercli` / `qoderclicn` flow) and resolves your account identity automatically.
@@ -125,15 +120,23 @@ A Qoder PAT (`pt-...`) cannot authenticate API calls directly — the provider e
 **Global Qoder:**
 
 - Run `/login qoder` and choose **Use API Key (PAT)**, then paste the token.
-- Or set `QODER_PERSONAL_ACCESS_TOKEN` (or `QODER_PAT`) before starting pi.
+- Or set `QODER_PERSONAL_ACCESS_TOKEN` (or `QODER_PAT`) before starting pi, then run `/login qoder`.
 
 **Qoder China:**
 
-- Run `/login qoder-cn`, then paste the CN PAT.
-- Or set `QODERCN_PERSONAL_ACCESS_TOKEN` (or `QODERCN_PAT`) before starting pi.
+- Run `/login qoder-cn`, choose the VPC / China public cloud, then paste the CN PAT.
+- Or set `QODERCN_PERSONAL_ACCESS_TOKEN` (or `QODERCN_PAT`) before starting pi, then run `/login qoder-cn`.
 - `QODER_API_KEY` is accepted as a CN PAT alias **only** when the value starts with `pt-`.
 
-> The exchanged job token (`jt-...`) is short-lived. After login the provider persists a **job refresh token** (`jrt-...`) only — it does **not** store the plaintext PAT. When the job token expires, the provider calls `POST /api/v1/jobToken/refresh`. If refresh fails, log in again with a PAT.
+After successful login, the PAT is saved in **macOS Keychain / Windows Credential Manager / Linux Secret Service**, scoped by OpenAPI endpoint and account. Host credentials (`auth.json`) still contain only short-lived tokens and the JRT, never the plaintext PAT.
+
+- Normal renewal uses `POST /api/v1/jobToken/refresh`. If the JRT is explicitly rejected or expired, the provider automatically exchanges the saved PAT. No PAT environment variable is needed.
+- Network failures, rate limits and server 5xx errors are propagated without PAT exchange or a misleading re-login instruction. If the server rejects the PAT itself, run `/login` again with a valid PAT.
+- Existing JRT-only sessions need one more login after upgrading and restarting Pi to save the PAT. Legacy credentials embedding a PAT migrate it into the system store after successful renewal.
+- The system credential store must be available and unlocked. Linux requires a persistent Secret Service (such as GNOME Keyring / KWallet); there is no fallback to reboot-volatile kernel keyrings or plaintext files. Login fails explicitly if the PAT cannot be saved.
+- `/logout` removes the host session but does not remove the saved PAT: Pi exposes no provider logout callback. The provider does not automatically create a new login from the saved PAT alone. To remove it completely, delete the system credential entry with service `pi-qoder-provider:<OpenAPI URL>` and the relevant userID as account; revoke the PAT in Qoder to invalidate access.
+
+**Both the PAT and enterprise VPC configuration can be saved through one interactive login, without any Qoder environment variables.** The PAT goes into the system credential store; the non-secret instance configuration goes into a local file.
 
 ### Region environment variables
 
@@ -145,18 +148,28 @@ Setting a CN PAT without a global PAT also auto-selects CN mode for the `qoder` 
 
 ### Enterprise VPC
 
-Set the VPC instance name shown before `.vpc.qoder.com.cn`:
+Run `/login qoder-cn` and enter the instance name at the VPC prompt, for example:
 
-```bash
-export QODER_VPC_INSTANCE=sungrow-of-enterprise
+```text
+sungrow-of-enterprise
 ```
+
+You can also paste `https://sungrow-of-enterprise.vpc.qoder.com.cn` or its `-gateway` / `-openapi` URL. Then enter a PAT issued by that tenant.
+
+After successful authentication, the normalized instance is saved to `~/.pi/agent/qoder-cn-config.json` (or the directory specified by `PI_CODING_AGENT_DIR`), for example:
+
+```json
+{ "vpcInstance": "sungrow-of-enterprise" }
+```
+
+This file never contains the PAT. It is loaded automatically after restart and shared by login, model discovery, chat, usage and token renewal. Log in again to change the instance, or enter `public` to save China public cloud routing. Restart Pi after manual edits to this file. Logging out does not clear this non-secret configuration.
 
 The provider derives the service-specific hosts expected by Qoder VPC:
 
 - `https://<instance>-gateway.vpc.qoder.com.cn`
 - `https://<instance>-openapi.vpc.qoder.com.cn`
 
-`QODER_VPC_ENDPOINT` and the official CLI variable `QODERCN_VPC_ENDPOINT` are accepted as aliases. The legacy `QODERCN_CLI_VPC_ENDPOINT` spelling is also accepted. Existing `QODER_CN_BASE_URL`, `QODER_CN_OPENAPI_URL`, and `QODER_CN_CENTER_URL` overrides remain supported; when they contain the tenant dashboard host, the provider normalizes them to the corresponding gateway or OpenAPI host.
+Existing environment variables remain **explicit overrides**, not requirements: `QODER_VPC_INSTANCE`, `QODER_VPC_ENDPOINT`, `QODERCN_VPC_ENDPOINT`, `QODERCN_CLI_VPC_ENDPOINT`, and `QODER_CN_BASE_URL`, `QODER_CN_OPENAPI_URL`, `QODER_CN_CENTER_URL`. With an override, login announces environment routing and skips the VPC prompt. Successful login also saves a recognizable VPC instance, allowing you to remove the environment variables afterward. Arbitrary custom API URLs remain environment-only overrides and are not saved as instance configuration.
 
 > `<instance>.vpc.qoder.com.cn` is the tenant dashboard host, not an API host. Sending PAT exchange or COSY chat there returns `CSRFInvalid` because it hits web/session middleware. Always use the derived `-gateway` / `-openapi` hosts above.
 
