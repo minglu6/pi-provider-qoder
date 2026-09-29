@@ -136,6 +136,70 @@ describe("streamQoder SSE handling", () => {
     expect(result.content).toEqual([{ type: "text", text: "pong" }]);
   });
 
+  it.each([
+    false,
+    "high",
+  ])("emits executable DSML calls with reasoning=%s without leaking markup", async (reasoning) => {
+    const markup = `<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name="bash"><｜｜DSML｜｜ parameter name="command" string="true">echo "DSML_OK"; id</｜｜DSML｜｜ parameter><｜｜DSML｜｜ parameter name="timeout" string="false">120</｜｜DSML｜｜ parameter></｜｜DSML｜｜ invoke></｜｜DSML｜｜ calls>`;
+    mocks.fetch.mockResolvedValue(
+      responseWithSse(
+        envelope({ choices: [{ delta: { reasoning_content: "Use the shell." } }] }),
+        ...Array.from(markup, (content) => envelope({ choices: [{ delta: { content } }] })),
+        envelope({
+          choices: [
+            { delta: { tool_calls: [{ index: 0, id: "native_1", function: { name: "noop", arguments: "{}" } }] } },
+          ],
+        }),
+        "[DONE]",
+      ),
+    );
+
+    const stream = streamQoder(model, context, { ...options, reasoning } as unknown as SimpleStreamOptions);
+    const completedCalls = [];
+    let streamedText = "";
+    for await (const event of stream) {
+      if (event.type === "toolcall_end") completedCalls.push(event.toolCall);
+      if (event.type === "text_delta") streamedText += event.delta;
+    }
+    const result = await stream.result();
+    const calls = [
+      {
+        type: "toolCall",
+        id: "dsml_call_1",
+        name: "bash",
+        arguments: { command: 'echo "DSML_OK"; id', timeout: 120 },
+      },
+      { type: "toolCall", id: "native_1", name: "noop", arguments: {} },
+    ];
+    expect(result.stopReason).toBe("toolUse");
+    expect(completedCalls).toEqual(calls);
+    expect(result.content).toEqual([{ type: "thinking", thinking: "Use the shell." }, ...calls]);
+    expect(streamedText).toBe("");
+  });
+
+  it("finalizes a truncated DSML invoke into a tool call instead of transcript text", async () => {
+    mocks.fetch.mockResolvedValue(
+      responseWithSse(
+        envelope({
+          choices: [
+            {
+              delta: {
+                content:
+                  '<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name="read"><｜｜DSML｜｜ parameter name="path" string="true">/tmp/example</｜｜DSML｜｜ parameter>',
+              },
+            },
+          ],
+        }),
+        "[DONE]",
+      ),
+    );
+    const result = await streamQoder(model, context, options).result();
+    expect(result.stopReason).toBe("toolUse");
+    expect(result.content).toEqual([
+      { type: "toolCall", id: "dsml_call_1", name: "read", arguments: { path: "/tmp/example" } },
+    ]);
+  });
+
   it("preserves a no-argument tool call whose first delta has empty arguments", async () => {
     mocks.fetch.mockResolvedValue(
       responseWithSse(

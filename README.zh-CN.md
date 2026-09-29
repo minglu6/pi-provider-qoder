@@ -277,11 +277,18 @@ src/
 ├── pat.ts              # PAT → job token 兑换 + 身份解析
 ├── models.ts           # 模型定义与动态配置缓存
 ├── stream.ts           # 流式响应主处理
+├── dsml.ts             # 原生 DSML 文本 → 可执行工具调用
 ├── transform.ts        # 消息转换（OpenAI schema 映射）
 ├── usage.ts            # 用量 / 配额
 ├── thinking-parser.ts  # <think> 标签兜底解析
 └── qoder-encoding.ts   # WAF 绕过请求体编码
 ```
+
+DeepSeek 系列模型可能在 `delta.content` 中输出原生 DSML 标记，而不是结构化
+`tool_calls`。流式解析器将支持的 DSML 块转换为工具调用，并设置
+`stopReason: "toolUse"`，保留普通正文及参数类型。支持逐字符分片、多个 invoke，
+以及从截断的 invoke 中恢复已完整接收的参数。无法识别或超出缓冲上限的未完成
+标记回退为文本；不会改写已有会话历史。
 
 ## License
 

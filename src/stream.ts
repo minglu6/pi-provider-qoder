@@ -23,6 +23,7 @@ import {
   logCosyRequest,
   logCosyResponse,
 } from "./cosy.js";
+import { DsmlToolCallParser } from "./dsml.js";
 import {
   getCachedModelConfig,
   type QoderModelEntry,
@@ -341,6 +342,62 @@ export function streamQoder(
       const thinkingEnabled = (options?.reasoning as unknown) !== false && (options?.reasoning as unknown) !== "off";
       const thinkingParser = thinkingEnabled ? new ThinkingTagParser(output, stream) : null;
 
+      // Extract native DSML calls before they can leak into text or session history.
+      let nextDsmlToolCallKey = -1;
+      const dsmlParser = new DsmlToolCallParser({
+        onText: (text) => {
+          if (!text) return;
+          // End API thinking block if active.
+          if (thinkingBlockIndex !== -1) {
+            const block = output.content[thinkingBlockIndex] as ThinkingContent;
+            stream.push({
+              type: "thinking_end",
+              contentIndex: thinkingBlockIndex,
+              content: block.thinking,
+              partial: output,
+            });
+            thinkingBlockIndex = -1;
+          }
+
+          if (thinkingParser) {
+            thinkingParser.processChunk(text);
+          } else {
+            if (contentBlockIndex === -1) {
+              contentBlockIndex = output.content.length;
+              output.content.push({ type: "text", text: "" });
+              stream.push({ type: "text_start", contentIndex: contentBlockIndex, partial: output });
+            }
+            const block = output.content[contentBlockIndex] as TextContent;
+            block.text += text;
+            stream.push({
+              type: "text_delta",
+              contentIndex: contentBlockIndex,
+              delta: text,
+              partial: output,
+            });
+          }
+        },
+        onToolCall: (call) => {
+          const contentIndex = output.content.length;
+          output.content.push({
+            type: "toolCall",
+            id: call.id,
+            name: call.name,
+            arguments: call.arguments,
+          });
+          stream.push({ type: "toolcall_start", contentIndex, partial: output });
+          // Shared finalization emits toolcall_end and sets stopReason to toolUse.
+          // Negative keys keep DSML calls separate from OpenAI tool-call indices.
+          toolCallsState.set(nextDsmlToolCallKey, {
+            arguments: JSON.stringify(call.arguments),
+            id: call.id,
+            name: call.name,
+            contentIndex,
+          });
+          nextDsmlToolCallKey -= 1;
+        },
+      });
+
       stream.push({ type: "start", partial: output });
 
       while (true) {
@@ -404,37 +461,9 @@ export function streamQoder(
                 });
               }
 
-              // 2. Process text content
+              // 2. Process text content (DSML tool-call markup is extracted first)
               if (delta.content) {
-                // End API thinking block if active
-                if (thinkingBlockIndex !== -1) {
-                  const block = output.content[thinkingBlockIndex] as ThinkingContent;
-                  stream.push({
-                    type: "thinking_end",
-                    contentIndex: thinkingBlockIndex,
-                    content: block.thinking,
-                    partial: output,
-                  });
-                  thinkingBlockIndex = -1;
-                }
-
-                if (thinkingParser) {
-                  thinkingParser.processChunk(delta.content);
-                } else {
-                  if (contentBlockIndex === -1) {
-                    contentBlockIndex = output.content.length;
-                    output.content.push({ type: "text", text: "" });
-                    stream.push({ type: "text_start", contentIndex: contentBlockIndex, partial: output });
-                  }
-                  const block = output.content[contentBlockIndex] as TextContent;
-                  block.text += delta.content;
-                  stream.push({
-                    type: "text_delta",
-                    contentIndex: contentBlockIndex,
-                    delta: delta.content,
-                    partial: output,
-                  });
-                }
+                dsmlParser.processChunk(delta.content);
               }
 
               // 3. Process tool calls
@@ -484,6 +513,8 @@ export function streamQoder(
         }
       }
 
+      // Trailing plain text from DSML still belongs to the thinking/text pipeline.
+      dsmlParser.finalize();
       if (thinkingParser) {
         thinkingParser.finalize();
       }

@@ -19,6 +19,7 @@
     "README.md",
     "README.zh-CN.md",
     "src/cosy.ts",
+    "src/dsml.ts",
     "src/index.ts",
     "src/login.ts",
     "src/models.ts",
