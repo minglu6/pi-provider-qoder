@@ -101,8 +101,7 @@ function coerceParameterValue(rawValue: string, stringFlag?: string): unknown {
 function parseParameters(body: string): Record<string, unknown> {
   const args: Record<string, unknown> = {};
   PARAM_RE.lastIndex = 0;
-  let match: RegExpExecArray | null;
-  while ((match = PARAM_RE.exec(body)) !== null) {
+  for (let match = PARAM_RE.exec(body); match !== null; match = PARAM_RE.exec(body)) {
     const [, paramName, stringFlag, rawValue] = match;
     args[paramName] = coerceParameterValue(rawValue, stringFlag);
   }
