@@ -35,10 +35,9 @@ vi.mock("../qoder-encoding.js", () => ({
   qoderEncodeBody: (body: Buffer) => body.toString("utf8"),
 }));
 
-vi.mock("../transform.js", () => ({
-  transformMessagesForQoder: (messages: unknown) => messages,
-  transformTools: (tools: unknown) => tools,
-}));
+// Pi 0.99.1's extension loader maps pi-ai to compat. Use that real host API
+// while retaining the older development SDK for the legacy Context contract.
+vi.mock("@earendil-works/pi-ai", () => import("pi-ai-transcript/compat"));
 
 import { streamQoder } from "../stream.js";
 
@@ -134,6 +133,101 @@ describe("streamQoder SSE handling", () => {
 
     expect(result.stopReason).toBe("stop");
     expect(result.content).toEqual([{ type: "text", text: "pong" }]);
+  });
+
+  it("replays transcript prompt sections and tool changes into a leading system message", async () => {
+    mocks.fetch.mockResolvedValue(responseWithSse(envelope({ choices: [{ delta: { content: "pong" } }] }), "[DONE]"));
+    const transcript = {
+      systemPrompt: "Stale legacy prompt",
+      tools: [{ name: "stale", description: "Stale tool", parameters: {} }],
+      messages: [
+        {
+          role: "system",
+          content: "Base prompt",
+          sections: { rules: "old rules", temporary: "obsolete section" },
+          toolsAdded: [{ name: "removed", description: "Old tool", parameters: {} }],
+          timestamp: 0,
+        },
+        { role: "user", content: [{ type: "text", text: "ping" }], timestamp: 1 },
+        {
+          role: "system",
+          content: "Later instructions",
+          sections: { rules: "Use 兼容测试✓", temporary: null },
+          toolsRemoved: [{ name: "removed" }],
+          toolsAdded: [{ name: "echo_probe", description: "Echo", parameters: { type: "object" } }],
+          timestamp: 2,
+        },
+      ],
+    } as unknown as Context;
+
+    await streamQoder({ ...model, id: "GLM-5.3" }, transcript, options).result();
+    const payload = JSON.parse(mocks.fetch.mock.calls[0][1].body.toString());
+    expect(payload.system).toContain("Base prompt");
+    expect(payload.system).toContain("Later instructions");
+    expect(payload.system).toContain("Use 兼容测试✓");
+    expect(payload.system).not.toContain("old rules");
+    expect(payload.system).not.toContain("obsolete section");
+    expect(payload.system).not.toContain("Stale legacy prompt");
+    expect(payload.messages).toEqual([
+      { role: "system", content: payload.system },
+      { role: "user", content: "ping" },
+    ]);
+    expect(payload.tools).toEqual([
+      { type: "function", function: { name: "echo_probe", description: "Echo", parameters: { type: "object" } } },
+    ]);
+    expect(payload.chat_context.text).toBe("ping");
+  });
+
+  it("preserves legacy Context prompts and tools without system transcript messages", async () => {
+    mocks.fetch.mockResolvedValue(responseWithSse(envelope({ choices: [{ delta: { content: "pong" } }] }), "[DONE]"));
+    await streamQoder(
+      model,
+      {
+        ...context,
+        systemPrompt: "Legacy instructions",
+        tools: [{ name: "noop", description: "No-op", parameters: { type: "object" } }],
+      },
+      options,
+    ).result();
+    const payload = JSON.parse(mocks.fetch.mock.calls[0][1].body.toString());
+    expect(payload.system).toBe("Legacy instructions");
+    expect(payload.messages).toEqual([
+      { role: "system", content: "Legacy instructions" },
+      { role: "user", content: "ping" },
+    ]);
+    expect(payload.tools).toEqual([
+      { type: "function", function: { name: "noop", description: "No-op", parameters: { type: "object" } } },
+    ]);
+  });
+
+  it("does not resurrect legacy state when transcript sections and tools are removed", async () => {
+    mocks.fetch.mockResolvedValue(responseWithSse(envelope({ choices: [{ delta: { content: "pong" } }] }), "[DONE]"));
+    const transcript = {
+      systemPrompt: "Stale instructions",
+      tools: [{ name: "removed", description: "Stale tool", parameters: {} }],
+      messages: [
+        {
+          role: "system",
+          content: "",
+          sections: { rules: "temporary rules" },
+          toolsAdded: [{ name: "removed", description: "Old tool", parameters: {} }],
+          timestamp: 0,
+        },
+        {
+          role: "system",
+          content: "",
+          sections: { rules: null },
+          toolsRemoved: [{ name: "removed" }],
+          timestamp: 1,
+        },
+        { role: "user", content: "ping", timestamp: 2 },
+      ],
+    } as unknown as Context;
+    await streamQoder(model, transcript, options).result();
+    const payload = JSON.parse(mocks.fetch.mock.calls[0][1].body.toString());
+    expect(payload.system).toBe("");
+    expect(payload.messages).toEqual([{ role: "user", content: "ping" }]);
+    expect(payload.tools).toEqual([]);
   });
 
   it.each([

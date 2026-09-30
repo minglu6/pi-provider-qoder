@@ -53,6 +53,7 @@
     "@earendil-works/pi-ai": "^0.80.2",
     "@earendil-works/pi-coding-agent": "^0.80.2",
     "esbuild": "^0.28.1",
+    "pi-ai-transcript": "npm:@earendil-works/pi-ai@0.99.1",
     "typescript": "^5.7.0",
     "vitest": "^4.1.9"
   },

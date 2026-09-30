@@ -284,6 +284,15 @@ src/
 └── qoder-encoding.ts   # WAF 绕过请求体编码
 ```
 
+对于使用 `TranscriptContext` 的 Pi 宿主（包括 Pi 0.99.1），插件调用宿主的
+`getCurrentSystemPrompt` 和 `getCurrentTools` 重放全部 system 消息，处理
+sections 更新/删除及工具增删。没有 system 消息时，继续使用旧版
+`Context.systemPrompt` / `Context.tools`。折叠后的提示同时放入 Qoder 顶层
+`system` 字段和 messages 首条 system 消息，确保 GLM-5.3/OpenAI 兼容路由读取。
+
+流式回归测试通过仅开发依赖 `pi-ai-transcript` 别名加载真实 Pi 0.99.1 compat API，
+类型检查仍覆盖旧版 SDK 契约。无需修改 Pi 核心，也不依赖解析 GLM 伪工具调用文本。
+
 DeepSeek 系列模型可能在 `delta.content` 中输出原生 DSML 标记，而不是结构化
 `tool_calls`。流式解析器将支持的 DSML 块转换为工具调用，并设置
 `stopReason: "toolUse"`，保留普通正文及参数类型。支持逐字符分片、多个 invoke，

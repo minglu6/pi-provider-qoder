@@ -195,8 +195,22 @@ export function streamQoder(
       const isReasoning = !!modelConfig.is_reasoning;
       const maxOutputTokens = modelConfig.max_output_tokens || 32768;
 
-      const normalizedMessages = transformMessagesForQoder(context.messages);
-      const systemText = context.systemPrompt || "";
+      // Modern Pi replays prompt sections and tool changes from system messages.
+      // Keep the legacy Context path for hosts using the older SDK.
+      const hasSystemMessages = context.messages.some((msg: { role: string }) => msg.role === "system");
+      const helpers = PiAi as unknown as {
+        getCurrentSystemPrompt: (messages: Context["messages"]) => string;
+        getCurrentTools: (messages: Context["messages"]) => NonNullable<Context["tools"]>;
+      };
+      const systemText = hasSystemMessages
+        ? helpers.getCurrentSystemPrompt(context.messages)
+        : context.systemPrompt || "";
+      const activeTools = hasSystemMessages ? helpers.getCurrentTools(context.messages) : context.tools;
+      // GLM/OpenAI routes consume the leading system role, not just Qoder's system field.
+      const normalizedMessages = [
+        ...(systemText ? [{ role: "system" as const, content: systemText }] : []),
+        ...transformMessagesForQoder(context.messages),
+      ];
 
       let lastUserText = "";
       for (let i = normalizedMessages.length - 1; i >= 0; i--) {
@@ -222,7 +236,7 @@ export function streamQoder(
         maxTokens = options.maxTokens;
       }
 
-      const toolsRaw = context.tools && context.tools.length > 0 ? transformTools(context.tools) : undefined;
+      const toolsRaw = activeTools && activeTools.length > 0 ? transformTools(activeTools) : undefined;
       const recordID = stableChatRecordID(qoderModel, normalizedMessages, toolsRaw, maxTokens);
 
       const reqBody: Record<string, unknown> = {
