@@ -283,6 +283,17 @@ src/
 └── qoder-encoding.ts   # WAF bypass body encoder
 ```
 
+For Pi hosts using `TranscriptContext` (including Pi 0.99.1), the provider uses
+the host's `getCurrentSystemPrompt` and `getCurrentTools` helpers to replay system
+messages, including section updates/removals and tool additions/removals. Legacy
+`Context.systemPrompt` / `Context.tools` remain supported when no system messages
+are present. The resolved prompt is sent both in Qoder's `system` field and as a
+leading system message so GLM-5.3/OpenAI-compatible routes receive it.
+
+Stream regression tests use the real Pi 0.99.1 compat API through the dev-only
+`pi-ai-transcript` alias, while type checking retains the older SDK contract.
+No Pi core changes or GLM pseudo-tool-call text parsing are required.
+
 ## License
 
 MIT
