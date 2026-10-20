@@ -34,14 +34,17 @@ function couldBeCheckpoint(text: string): boolean {
   return "<analysis>".startsWith(prefix) || prefix.startsWith("<analysis>");
 }
 
+export type ResponseRecoveryReason = "checkpoint" | "incomplete";
+
 /**
  * Hold only undecided response prefixes. Once ordinary text or a tool call is
  * seen, stream normally. Native reasoning is held until that decision, so a
  * rejected attempt cannot leak through start.partial or thinking events either.
- * Retry generation only, never execute tools or replay the rejected checkpoint.
+ * Retry generation only, never execute tools or replay a rejected response.
+ * Checkpoint and thinking-only failures share one retry, before public output.
  */
-export function withCheckpointRecovery(
-  createAttempt: (recovery: boolean) => AssistantMessageEventStream,
+export function withResponseRecovery(
+  createAttempt: (recovery?: ResponseRecoveryReason) => AssistantMessageEventStream,
   signal?: AbortSignal,
 ): AssistantMessageEventStream {
   const StreamCtor = (PiAi as unknown as { AssistantMessageEventStream: new () => AssistantMessageEventStream })
@@ -49,8 +52,9 @@ export function withCheckpointRecovery(
   const stream = new StreamCtor();
   void (async () => {
     try {
+      let recovery: ResponseRecoveryReason | undefined;
       for (let attempt = 0; attempt < 2; attempt++) {
-        const source = createAttempt(attempt > 0);
+        const source = createAttempt(recovery);
         let pending: AssistantMessageEvent[] = [];
         let text = "";
         let released = false;
@@ -83,12 +87,22 @@ export function withCheckpointRecovery(
           });
           return;
         }
+        if (result.stopReason === "error" && result.errorMessage?.startsWith("QODER_INCOMPLETE_RESPONSE:")) {
+          if (attempt === 0) {
+            recovery = "incomplete";
+            continue;
+          }
+          result.errorMessage += " Recovery generation also returned incomplete output; no further retry was made.";
+        }
         if (isConversationCheckpoint(text)) {
           if (result.stopReason === "error" || result.stopReason === "aborted") {
             stream.push({ type: "error", reason: result.stopReason, error: { ...result, content: [] } });
             return;
           }
-          if (attempt === 0) continue;
+          if (attempt === 0) {
+            recovery = "checkpoint";
+            continue;
+          }
           stream.push({
             type: "error",
             reason: "error",
@@ -97,7 +111,7 @@ export function withCheckpointRecovery(
               content: [],
               stopReason: "error",
               errorMessage:
-                "QODER_UNEXPECTED_SUMMARY: Qoder returned an unsolicited conversation checkpoint twice. No answer or tool call was accepted. Retry in a new session or switch models.",
+                "QODER_UNEXPECTED_SUMMARY: Recovery generation returned an unsolicited conversation checkpoint. No answer or tool call was accepted. Retry in a new session or switch models.",
             },
           });
           return;

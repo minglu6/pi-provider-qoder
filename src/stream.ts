@@ -30,7 +30,7 @@ import {
 } from "./models.js";
 import { resolveQoderIdentity } from "./oauth.js";
 import { qoderEncodeBody } from "./qoder-encoding.js";
-import { requestsSummary, withCheckpointRecovery } from "./response-guard.js";
+import { type ResponseRecoveryReason, requestsSummary, withResponseRecovery } from "./response-guard.js";
 import { applyQoderUsage, type QoderTokenUsage, qoderStopReason } from "./stream-metadata.js";
 import { ThinkingTagParser } from "./thinking-parser.js";
 import { type QoderContext, resolveQoderContext, transformMessagesForQoder, transformTools } from "./transform.js";
@@ -131,14 +131,14 @@ export function streamQoder(
   const requestedText = typeof lastUserText === "string" ? lastUserText : JSON.stringify(lastUserText ?? "");
   // Host compaction is tool-free. Explicit user summaries must remain valid.
   if (resolved.tools.length === 0 || requestsSummary(requestedText)) return streamQoderAttempt(model, context, options);
-  return withCheckpointRecovery((recovery) => streamQoderAttempt(model, context, options, recovery), options?.signal);
+  return withResponseRecovery((recovery) => streamQoderAttempt(model, context, options, recovery), options?.signal);
 }
 
 function streamQoderAttempt(
   model: Model<Api>,
   context: QoderContext,
   options?: SimpleStreamOptions,
-  recovery = false,
+  recovery?: ResponseRecoveryReason,
 ): AssistantMessageEventStream {
   const StreamCtor = (PiAi as unknown as { AssistantMessageEventStream: new () => AssistantMessageEventStream })
     .AssistantMessageEventStream;
@@ -206,9 +206,13 @@ function streamQoderAttempt(
 
       const resolvedContext = resolveQoderContext(context);
       const normalizedMessages = transformMessagesForQoder(resolvedContext.messages);
-      const systemText = recovery
-        ? `${resolvedContext.systemPrompt}\n\nThis is not a context-compaction request. Answer the latest user task using the supplied conversation and tool results. Do not replace the answer with an internal conversation checkpoint.`
-        : resolvedContext.systemPrompt;
+      const recoveryInstruction =
+        recovery === "incomplete"
+          ? "\n\nThe previous generation ended with reasoning only and no answer or tool call. Complete the latest user task using the supplied conversation and existing tool results. Return a user-facing answer or a real tool call through the tools interface, not just a plan to act. Do not repeat completed tool actions."
+          : recovery === "checkpoint"
+            ? "\n\nThis is not a context-compaction request. Answer the latest user task using the supplied conversation and tool results. Do not replace the answer with an internal conversation checkpoint."
+            : "";
+      const systemText = resolvedContext.systemPrompt + recoveryInstruction;
 
       let lastUserText = "";
       for (let i = normalizedMessages.length - 1; i >= 0; i--) {

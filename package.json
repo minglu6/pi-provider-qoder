@@ -1,6 +1,6 @@
 {
   "name": "pi-qoder-provider",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "description": "Pi extension for Qoder AI — with OAuth authentication, COSY signatures and WAF bypass",
   "type": "module",
   "license": "MIT",

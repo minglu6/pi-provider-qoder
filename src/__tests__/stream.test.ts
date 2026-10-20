@@ -494,8 +494,11 @@ describe("streamQoder SSE handling", () => {
     expect(JSON.stringify(events)).not.toContain("Review the conversation");
   });
 
-  it("recovery preserves prior tool results and returns a new tool call only once", async () => {
-    mocks.fetch.mockResolvedValueOnce(textResponse(checkpoint)).mockResolvedValueOnce(
+  it.each([
+    checkpoint,
+    "<thinking>Let me run the next check.",
+  ])("recovery preserves prior tool results and returns a new tool call only once: %s", async (incomplete) => {
+    mocks.fetch.mockResolvedValueOnce(textResponse(incomplete)).mockResolvedValueOnce(
       responseWithSse(
         envelope({
           choices: [
@@ -667,12 +670,98 @@ describe("streamQoder SSE handling", () => {
   });
 
   it.each([
+    { reasoning_content: "Let me simulate the current parsing behavior. Let's run." },
+    { content: "<thinking>Let me run the next check.</thinking> \n" },
+    { content: "<thinking>Let me run the next check." },
+  ])("recovers thinking-only generation once without exposing the discarded attempt: %j", async (delta) => {
+    mocks.fetch
+      .mockResolvedValueOnce(responseWithSse(envelope({ choices: [{ delta, finish_reason: "stop" }] }), "[DONE]"))
+      .mockResolvedValueOnce(textResponse("已完成核查，文件名不会命中原关键词。"));
+    const stream = streamQoder(model, agentContext, { ...options, sessionId: "chat-a" });
+    const events = [];
+    for await (const event of stream) events.push(event);
+    const result = await stream.result();
+
+    expect(result.stopReason).toBe("stop");
+    expect(result.content).toEqual([{ type: "text", text: "已完成核查，文件名不会命中原关键词。" }]);
+    expect(events.filter((event) => event.type === "start")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "done")).toHaveLength(1);
+    expect(events.some((event) => event.type === "error" || event.type === "thinking_delta")).toBe(false);
+    expect(JSON.stringify(events)).not.toContain("Let me");
+    expect(mocks.fetch).toHaveBeenCalledTimes(2);
+    const [first, retry] = mocks.fetch.mock.calls.map((call) => JSON.parse(call[1].body.toString("utf8")));
+    expect(retry.messages).toEqual(first.messages);
+    expect(retry.tools).toEqual(first.tools);
+    expect(retry.system).toContain("Return a user-facing answer or a real tool call");
+    expect(retry.session_id).not.toBe(first.session_id);
+    expect(retry.chat_record_id).not.toBe(first.chat_record_id);
+  });
+
+  it.each([
+    ["<thinking>Only a plan.", checkpoint],
+    [checkpoint, "<thinking>Only a plan."],
+  ])("shares a single recovery limit across incomplete output and checkpoints: %j", async (first, second) => {
+    mocks.fetch.mockResolvedValueOnce(textResponse(first)).mockResolvedValueOnce(textResponse(second));
+    const stream = streamQoder(model, agentContext, options);
+    const events = [];
+    for await (const event of stream) events.push(event);
+    const result = await stream.result();
+    expect(mocks.fetch).toHaveBeenCalledTimes(2);
+    expect(result.stopReason).toBe("error");
+    expect(events.filter((event) => event.type === "error")).toHaveLength(1);
+    expect(events.some((event) => event.type === "done" || event.type === "toolcall_start")).toBe(false);
+    if (second === checkpoint) {
+      expect(result.errorMessage).toContain("QODER_UNEXPECTED_SUMMARY");
+      expect(result.content).toEqual([]);
+    } else {
+      expect(result.errorMessage).toContain("QODER_INCOMPLETE_RESPONSE");
+      expect(result.errorMessage).toContain("no further retry");
+      expect(result.content).toEqual([{ type: "thinking", thinking: "Only a plan." }]);
+    }
+  });
+
+  it("does not retry incomplete output after public text has already streamed", async () => {
+    mocks.fetch.mockResolvedValue(textResponse("已找到文件。<thinking>Let me check."));
+    const result = await streamQoder(model, agentContext, options).result();
+    expect(result.stopReason).toBe("error");
+    expect(result.errorMessage).toContain("QODER_INCOMPLETE_RESPONSE");
+    expect(result.content).toEqual([
+      { type: "text", text: "已找到文件。" },
+      { type: "thinking", thinking: "Let me check." },
+    ]);
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry a thinking-only attempt cancelled before recovery", async () => {
+    const controller = new AbortController();
+    mocks.fetch.mockResolvedValue(textResponse("<thinking>Let me check."));
+    const result = await streamQoder(model, agentContext, {
+      ...options,
+      signal: controller.signal,
+      onProviderStreamEvent: () => controller.abort(),
+    } as SimpleStreamOptions).result();
+    expect(result.stopReason).toBe("aborted");
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces an upstream failure during incomplete-output recovery without another retry", async () => {
+    mocks.fetch
+      .mockResolvedValueOnce(textResponse("<thinking>Let me check."))
+      .mockResolvedValueOnce(responseWithSse(envelope("rate limited", 429)));
+    const result = await streamQoder(model, agentContext, options).result();
+    expect(result.stopReason).toBe("error");
+    expect(result.errorMessage).toContain("429");
+    expect(result.content).toEqual([]);
+    expect(mocks.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
     false,
     "off",
     "high",
-  ])("rejects the fragmented unclosed thinking incident with reasoning=%s without retrying or inventing tools", async (reasoning) => {
+  ])("rejects repeated fragmented unclosed thinking with reasoning=%s without inventing tools", async (reasoning) => {
     const chunks = ["<", "thinking", ">", "Confirmed", " live", ".</", "｜｜DSML｜｜", " parameter", ">"];
-    mocks.fetch.mockResolvedValue(
+    mocks.fetch.mockImplementation(() =>
       responseWithSse(
         ...chunks.map((content) => envelope({ choices: [{ delta: { content } }] })),
         envelope({ choices: [{ finish_reason: "stop" }] }),
@@ -691,7 +780,7 @@ describe("streamQoder SSE handling", () => {
     expect(events.filter((event) => event.type === "thinking_end")).toHaveLength(1);
     expect(events.filter((event) => event.type === "error")).toHaveLength(1);
     expect(events.some((event) => event.type === "done")).toBe(false);
-    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+    expect(mocks.fetch).toHaveBeenCalledTimes(2);
   });
 
   it.each([
@@ -702,11 +791,11 @@ describe("streamQoder SSE handling", () => {
     { delta: { content: "<thinking>" }, finish_reason: "stop" },
     { delta: { content: "<thinking></thinking>" }, finish_reason: "stop" },
   ])("rejects incomplete output without a usable answer: %j", async (choice) => {
-    mocks.fetch.mockResolvedValue(responseWithSse(envelope({ choices: [choice] }), "[DONE]"));
+    mocks.fetch.mockImplementation(() => responseWithSse(envelope({ choices: [choice] }), "[DONE]"));
     const result = await streamQoder(model, agentContext, options).result();
     expect(result.stopReason).toBe("error");
     expect(result.errorMessage).toContain("QODER_INCOMPLETE_RESPONSE");
-    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+    expect(mocks.fetch).toHaveBeenCalledTimes(choice.delta.content?.startsWith("prefix") ? 1 : 2);
   });
 
   it("preserves native reasoning, tagged reasoning and the complete answer with paired end events", async () => {
