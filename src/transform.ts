@@ -23,7 +23,7 @@ interface QoderSystemMessage {
 
 export interface QoderContext {
   messages: Array<Message | QoderSystemMessage>;
-  systemPrompt?: string;
+  systemPrompt?: string | string[];
   tools?: Tool[];
 }
 
@@ -35,7 +35,11 @@ export function resolveQoderContext(context: QoderContext): {
 } {
   const messages = context.messages.filter((message): message is Message => message.role !== "system");
   if (!context.messages.some((message) => message.role === "system")) {
-    return { systemPrompt: context.systemPrompt ?? "", tools: context.tools ?? [], messages };
+    // OMP supplies ordered prompt sections; Qoder requires a single string.
+    const systemPrompt = Array.isArray(context.systemPrompt)
+      ? context.systemPrompt.join("\n\n")
+      : (context.systemPrompt ?? "");
+    return { systemPrompt, tools: context.tools ?? [], messages };
   }
 
   // Pi supplies these helpers at runtime. Older Pi/OMP and the legacy SDK don't,

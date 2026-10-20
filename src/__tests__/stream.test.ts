@@ -187,6 +187,18 @@ describe("streamQoder SSE handling", () => {
     });
   });
 
+  it("accepts OMP prompt sections without passing arrays into request hashing", async () => {
+    mockTextResponse();
+    const result = await streamQoder(
+      model,
+      { ...context, systemPrompt: ["Base instructions", "Workspace instructions"] },
+      options,
+    ).result();
+
+    expect(result.stopReason).toBe("stop");
+    expect(requestBody().system).toBe("Base instructions\n\nWorkspace instructions");
+  });
+
   it("preserves tool calls and results on the follow-up transcript request", async () => {
     mockTextResponse();
     const transcript = {
