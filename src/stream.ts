@@ -5,7 +5,6 @@ import type {
   AssistantMessageEventStream,
   Model,
   SimpleStreamOptions,
-  TextContent,
   ThinkingContent,
   ToolCall,
 } from "@earendil-works/pi-ai";
@@ -366,12 +365,11 @@ function streamQoderAttempt(
       let finishReason: string | undefined;
       let usage: QoderTokenUsage = {};
 
-      let contentBlockIndex = -1;
       let thinkingBlockIndex = -1;
       const toolCallsState = new Map<number, ToolCallState>();
 
-      const thinkingEnabled = (options?.reasoning as unknown) !== false && (options?.reasoning as unknown) !== "off";
-      const thinkingParser = thinkingEnabled ? new ThinkingTagParser(output, stream) : null;
+      // Upstream may emit tagged reasoning even when the requested effort is off.
+      const thinkingParser = new ThinkingTagParser(output, stream);
 
       stream.push({ type: "start", partial: output });
 
@@ -477,23 +475,7 @@ function streamQoderAttempt(
                     thinkingBlockIndex = -1;
                   }
 
-                  if (thinkingParser) {
-                    thinkingParser.processChunk(delta.content);
-                  } else {
-                    if (contentBlockIndex === -1) {
-                      contentBlockIndex = output.content.length;
-                      output.content.push({ type: "text", text: "" });
-                      stream.push({ type: "text_start", contentIndex: contentBlockIndex, partial: output });
-                    }
-                    const block = output.content[contentBlockIndex] as TextContent;
-                    block.text += delta.content;
-                    stream.push({
-                      type: "text_delta",
-                      contentIndex: contentBlockIndex,
-                      delta: delta.content,
-                      partial: output,
-                    });
-                  }
+                  thinkingParser.processChunk(delta.content);
                 }
 
                 // 3. Process tool calls
@@ -550,16 +532,7 @@ function streamQoderAttempt(
       options?.signal?.throwIfAborted();
       if (!completed && !finishReason) throw new Error("Qoder stream ended without a completion marker");
 
-      if (thinkingParser) {
-        thinkingParser.finalize();
-      } else if (contentBlockIndex !== -1) {
-        stream.push({
-          type: "text_end",
-          contentIndex: contentBlockIndex,
-          content: (output.content[contentBlockIndex] as TextContent).text,
-          partial: output,
-        });
-      }
+      thinkingParser.finalize();
 
       if (thinkingBlockIndex !== -1) {
         const block = output.content[thinkingBlockIndex] as ThinkingContent;
@@ -588,11 +561,24 @@ function streamQoderAttempt(
         });
       }
 
-      if (output.content.length === 0) {
+      const stopReason = qoderStopReason(finishReason, toolCallsState.size > 0);
+      if (
+        stopReason === "stop" &&
+        toolCallsState.size === 0 &&
+        (thinkingParser.hasUnclosedThinking() ||
+          ((thinkingParser.hasTaggedThinking() || output.content.some((block) => block.type === "thinking")) &&
+            !output.content.some((block) => block.type === "text" && block.text.trim())))
+      ) {
+        throw new Error(
+          "QODER_INCOMPLETE_RESPONSE: Qoder completed with unfinished or thinking-only output and no tool call.",
+        );
+      }
+
+      if (output.content.length === 0 && !thinkingParser.hasTaggedThinking()) {
         throw new Error("Qoder upstream completed without assistant content");
       }
 
-      output.stopReason = qoderStopReason(finishReason, toolCallsState.size > 0);
+      output.stopReason = stopReason;
       stream.push({ type: "done", reason: output.stopReason, message: output });
       stream.end();
     } catch (e: unknown) {

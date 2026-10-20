@@ -654,6 +654,156 @@ describe("streamQoder SSE handling", () => {
     expect(result.errorMessage).toBe("Qoder upstream completed without assistant content");
   });
 
+  it.each([
+    false,
+    "off",
+    "high",
+  ])("rejects the fragmented unclosed thinking incident with reasoning=%s without retrying or inventing tools", async (reasoning) => {
+    const chunks = ["<", "thinking", ">", "Confirmed", " live", ".</", "｜｜DSML｜｜", " parameter", ">"];
+    mocks.fetch.mockResolvedValue(
+      responseWithSse(
+        ...chunks.map((content) => envelope({ choices: [{ delta: { content } }] })),
+        envelope({ choices: [{ finish_reason: "stop" }] }),
+        "[DONE]",
+      ),
+    );
+    const stream = streamQoder(model, agentContext, { ...options, reasoning } as SimpleStreamOptions);
+    const events = [];
+    for await (const event of stream) events.push(event);
+    const result = await stream.result();
+
+    expect(result.stopReason).toBe("error");
+    expect(result.errorMessage).toContain("QODER_INCOMPLETE_RESPONSE");
+    expect(result.content).toEqual([{ type: "thinking", thinking: chunks.join("").slice("<thinking>".length) }]);
+    expect(events.some((event) => event.type === "text_delta" || event.type === "toolcall_start")).toBe(false);
+    expect(events.filter((event) => event.type === "thinking_end")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "error")).toHaveLength(1);
+    expect(events.some((event) => event.type === "done")).toBe(false);
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { delta: { content: "<think>reason</think>" }, finish_reason: "stop" },
+    { delta: { content: "<reasoning>reason</reasoning> \n" }, finish_reason: undefined },
+    { delta: { reasoning_content: "native reasoning" }, finish_reason: "stop" },
+    { delta: { content: "prefix<thought>unfinished" }, finish_reason: "stop" },
+    { delta: { content: "<thinking>" }, finish_reason: "stop" },
+    { delta: { content: "<thinking></thinking>" }, finish_reason: "stop" },
+  ])("rejects incomplete output without a usable answer: %j", async (choice) => {
+    mocks.fetch.mockResolvedValue(responseWithSse(envelope({ choices: [choice] }), "[DONE]"));
+    const result = await streamQoder(model, agentContext, options).result();
+    expect(result.stopReason).toBe("error");
+    expect(result.errorMessage).toContain("QODER_INCOMPLETE_RESPONSE");
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves native reasoning, tagged reasoning and the complete answer with paired end events", async () => {
+    mocks.fetch.mockResolvedValue(
+      responseWithSse(
+        envelope({ choices: [{ delta: { reasoning_content: "native reasoning" } }] }),
+        ...Array.from("prefix<think>tagged reasoning</think>\n\nanswer", (content) =>
+          envelope({ choices: [{ delta: { content } }] }),
+        ),
+        "[DONE]",
+      ),
+    );
+    const stream = streamQoder(model, context, options);
+    const events = [];
+    for await (const event of stream) events.push(event);
+    const result = await stream.result();
+    expect(result.stopReason).toBe("stop");
+    expect(result.content).toEqual([
+      { type: "thinking", thinking: "native reasoning" },
+      { type: "text", text: "prefix" },
+      { type: "thinking", thinking: "tagged reasoning" },
+      { type: "text", text: "\n\nanswer" },
+    ]);
+    for (const [index, block] of result.content.entries()) {
+      expect(
+        events.filter(
+          (event) => event.type === `${block.type}_end` && "contentIndex" in event && event.contentIndex === index,
+        ),
+      ).toHaveLength(1);
+    }
+  });
+
+  it.each([
+    "<think>reason</think>",
+    "<think>unfinished",
+  ])("preserves a real tool call alongside tagged thinking: %s", async (content) => {
+    mocks.fetch.mockResolvedValue(
+      responseWithSse(
+        envelope({
+          choices: [
+            {
+              delta: {
+                tool_calls: [{ index: 0, id: "call_1", function: { name: "bash", arguments: '{"command":' } }],
+              },
+            },
+          ],
+        }),
+        envelope({ choices: [{ delta: { content } }] }),
+        envelope({
+          choices: [
+            { delta: { tool_calls: [{ index: 0, function: { arguments: '"pwd"}' } }] }, finish_reason: "stop" },
+          ],
+        }),
+        "[DONE]",
+      ),
+    );
+    const result = await streamQoder(model, agentContext, options).result();
+    expect(result.stopReason).toBe("toolUse");
+    expect(result.content).toContainEqual({
+      type: "toolCall",
+      id: "call_1",
+      name: "bash",
+      arguments: { command: "pwd" },
+    });
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    "<thinking>unfinished",
+    "<think>reason</think>",
+    "<thinking>",
+  ])("keeps length termination for thinking output: %s", async (content) => {
+    mocks.fetch.mockResolvedValue(
+      responseWithSse(envelope({ choices: [{ delta: { content }, finish_reason: "length" }] }), "[DONE]"),
+    );
+    const result = await streamQoder(model, context, options).result();
+    expect(result.stopReason).toBe("length");
+    expect(result.errorMessage).toBeUndefined();
+    expect(result.content.every((block) => block.type === "thinking")).toBe(true);
+  });
+
+  it("keeps abort precedence over incomplete thinking", async () => {
+    const controller = new AbortController();
+    mocks.fetch.mockResolvedValue(textResponse("<thinking>unfinished"));
+    const result = await streamQoder(model, context, {
+      ...options,
+      signal: controller.signal,
+      onProviderStreamEvent: () => controller.abort(),
+    } as SimpleStreamOptions).result();
+    expect(result.stopReason).toBe("aborted");
+    expect(result.errorMessage).not.toContain("QODER_INCOMPLETE_RESPONSE");
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps an upstream failure rather than replacing it with an incomplete-output error", async () => {
+    mocks.fetch.mockResolvedValue(
+      responseWithSse(
+        envelope({ choices: [{ delta: { content: "<think>unfinished" } }] }),
+        envelope("unavailable", 503),
+      ),
+    );
+    const result = await streamQoder(model, agentContext, options).result();
+    expect(result.stopReason).toBe("error");
+    expect(result.errorMessage).toContain("503");
+    expect(result.errorMessage).not.toContain("QODER_INCOMPLETE_RESPONSE");
+    expect(result.content).toEqual([{ type: "thinking", thinking: "unfinished" }]);
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+  });
+
   it("still returns valid assistant text", async () => {
     mocks.fetch.mockResolvedValue(
       responseWithSse(envelope({ choices: [{ delta: { content: "pong" }, finish_reason: "stop" }] }), "[DONE]"),

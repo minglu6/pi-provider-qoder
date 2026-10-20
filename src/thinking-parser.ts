@@ -11,6 +11,7 @@ const THINKING_TAG_VARIANTS: Array<{ open: string; close: string }> = [
   { open: "<reasoning>", close: "</reasoning>" },
   { open: "<thought>", close: "</thought>" },
 ];
+const THINKING_OPEN_TAGS = THINKING_TAG_VARIANTS.map((variant) => variant.open);
 
 function getTrailingPossibleTagPrefixLength(text: string, tag: string): number {
   const maxPrefixLength = Math.min(text.length, tag.length - 1);
@@ -31,7 +32,7 @@ function getMaxTrailingPossibleTagPrefixLength(text: string, tags: string[]): nu
 export class ThinkingTagParser {
   private textBuffer = "";
   private inThinking = false;
-  private thinkingExtracted = false;
+  private thinkingSeen = false;
   private thinkingBlockIndex: number | null = null;
   private textBlockIndex: number | null = null;
   private lastTextBlockIndex: number | null = null;
@@ -46,43 +47,32 @@ export class ThinkingTagParser {
     this.textBuffer += chunk;
     while (this.textBuffer.length > 0) {
       const prevLength = this.textBuffer.length;
-      if (!this.inThinking && !this.thinkingExtracted) {
-        this.processBeforeThinking();
-        if (this.textBuffer.length === 0) break;
-      }
       if (this.inThinking) {
         this.processInsideThinking();
-        if (this.textBuffer.length === 0) break;
-      }
-      if (this.thinkingExtracted) {
-        this.processAfterThinking();
-        break;
+      } else {
+        this.processBeforeThinking();
       }
       if (this.textBuffer.length >= prevLength) break;
     }
   }
 
   finalize(): void {
-    if (this.textBuffer.length === 0) return;
-    if (this.inThinking && this.thinkingBlockIndex !== null) {
-      const block = this.output.content[this.thinkingBlockIndex] as ThinkingContent;
-      block.thinking += this.textBuffer;
-      this.stream.push({
-        type: "thinking_delta",
-        contentIndex: this.thinkingBlockIndex,
-        delta: this.textBuffer,
-        partial: this.output,
-      });
-      this.stream.push({
-        type: "thinking_end",
-        contentIndex: this.thinkingBlockIndex,
-        content: block.thinking,
-        partial: this.output,
-      });
+    if (this.inThinking) {
+      this.emitThinking(this.textBuffer);
     } else {
       this.emitText(this.textBuffer);
     }
     this.textBuffer = "";
+    this.endThinking();
+    this.endText();
+  }
+
+  hasUnclosedThinking(): boolean {
+    return this.inThinking;
+  }
+
+  hasTaggedThinking(): boolean {
+    return this.thinkingSeen;
   }
 
   getTextBlockIndex(): number | null {
@@ -101,16 +91,15 @@ export class ThinkingTagParser {
     }
     if (bestPos !== -1 && bestVariant) {
       if (bestPos > 0) this.emitText(this.textBuffer.slice(0, bestPos));
+      this.endText();
       this.textBuffer = this.textBuffer.slice(bestPos + bestVariant.open.length);
+      this.thinkingSeen = true;
       this.activeEndTag = bestVariant.close;
       this.inThinking = true;
       return;
     }
 
-    const trailingPrefixLength = getMaxTrailingPossibleTagPrefixLength(
-      this.textBuffer,
-      THINKING_TAG_VARIANTS.map((variant) => variant.open),
-    );
+    const trailingPrefixLength = getMaxTrailingPossibleTagPrefixLength(this.textBuffer, THINKING_OPEN_TAGS);
     const safeLen = this.textBuffer.length - trailingPrefixLength;
     if (safeLen > 0) {
       this.emitText(this.textBuffer.slice(0, safeLen));
@@ -122,21 +111,9 @@ export class ThinkingTagParser {
     const endPos = this.textBuffer.indexOf(this.activeEndTag);
     if (endPos !== -1) {
       if (endPos > 0) this.emitThinking(this.textBuffer.slice(0, endPos));
-      if (this.thinkingBlockIndex !== null) {
-        const block = this.output.content[this.thinkingBlockIndex] as ThinkingContent;
-        this.stream.push({
-          type: "thinking_end",
-          contentIndex: this.thinkingBlockIndex,
-          content: block.thinking,
-          partial: this.output,
-        });
-      }
+      this.endThinking();
       this.textBuffer = this.textBuffer.slice(endPos + this.activeEndTag.length);
       this.inThinking = false;
-      this.thinkingExtracted = true;
-      this.lastTextBlockIndex = this.textBlockIndex;
-      this.textBlockIndex = null;
-      if (this.textBuffer.startsWith("\n\n")) this.textBuffer = this.textBuffer.slice(2);
       return;
     }
 
@@ -148,9 +125,29 @@ export class ThinkingTagParser {
     }
   }
 
-  private processAfterThinking(): void {
-    this.emitText(this.textBuffer);
-    this.textBuffer = "";
+  private endText(): void {
+    if (this.textBlockIndex === null) return;
+    const block = this.output.content[this.textBlockIndex] as TextContent;
+    this.stream.push({
+      type: "text_end",
+      contentIndex: this.textBlockIndex,
+      content: block.text,
+      partial: this.output,
+    });
+    this.lastTextBlockIndex = this.textBlockIndex;
+    this.textBlockIndex = null;
+  }
+
+  private endThinking(): void {
+    if (this.thinkingBlockIndex === null) return;
+    const block = this.output.content[this.thinkingBlockIndex] as ThinkingContent;
+    this.stream.push({
+      type: "thinking_end",
+      contentIndex: this.thinkingBlockIndex,
+      content: block.thinking,
+      partial: this.output,
+    });
+    this.thinkingBlockIndex = null;
   }
 
   private emitText(text: string): void {
@@ -168,14 +165,8 @@ export class ThinkingTagParser {
   private emitThinking(thinking: string): void {
     if (!thinking) return;
     if (this.thinkingBlockIndex === null) {
-      if (this.textBlockIndex !== null) {
-        this.thinkingBlockIndex = this.textBlockIndex;
-        this.output.content.splice(this.thinkingBlockIndex, 0, { type: "thinking", thinking: "" });
-        this.textBlockIndex = this.textBlockIndex + 1;
-      } else {
-        this.thinkingBlockIndex = this.output.content.length;
-        this.output.content.push({ type: "thinking", thinking: "" });
-      }
+      this.thinkingBlockIndex = this.output.content.length;
+      this.output.content.push({ type: "thinking", thinking: "" });
       this.stream.push({ type: "thinking_start", contentIndex: this.thinkingBlockIndex, partial: this.output });
     }
     const block = this.output.content[this.thinkingBlockIndex] as ThinkingContent;
