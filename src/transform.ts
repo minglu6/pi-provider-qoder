@@ -8,6 +8,73 @@ import type {
   ToolCall,
   ToolResultMessage,
 } from "@earendil-works/pi-ai";
+import * as PiAi from "@earendil-works/pi-ai";
+
+// Structural types keep this provider usable with both pre-transcript Pi/OMP
+// and modern Pi without requiring old hosts to export the new transcript types.
+interface QoderSystemMessage {
+  role: "system";
+  content: string | TextContent[];
+  sections?: Record<string, string | null>;
+  toolsAdded?: Tool[];
+  toolsRemoved?: Array<{ name: string }>;
+  timestamp: number;
+}
+
+export interface QoderContext {
+  messages: Array<Message | QoderSystemMessage>;
+  systemPrompt?: string;
+  tools?: Tool[];
+}
+
+/** Resolve transcript deltas before mapping to Qoder's top-level prompt/tools. */
+export function resolveQoderContext(context: QoderContext): {
+  systemPrompt: string;
+  tools: Tool[];
+  messages: Message[];
+} {
+  const messages = context.messages.filter((message): message is Message => message.role !== "system");
+  if (!context.messages.some((message) => message.role === "system")) {
+    return { systemPrompt: context.systemPrompt ?? "", tools: context.tools ?? [], messages };
+  }
+
+  // Pi supplies these helpers at runtime. Older Pi/OMP and the legacy SDK don't,
+  // so avoid named imports that would prevent the extension from loading there.
+  const transcript = PiAi as unknown as {
+    getCurrentSystemPrompt?: (messages: QoderContext["messages"]) => string;
+    getCurrentTools?: (messages: QoderContext["messages"]) => Tool[];
+  };
+  if (transcript.getCurrentSystemPrompt && transcript.getCurrentTools) {
+    return {
+      systemPrompt: transcript.getCurrentSystemPrompt(context.messages),
+      tools: transcript.getCurrentTools(context.messages),
+      messages,
+    };
+  }
+
+  // Compatibility for a transcript passed through a host with the older SDK.
+  // Once system messages exist, their state is authoritative, even when empty.
+  const content: string[] = [];
+  const sections = new Map<string, string>();
+  const tools = new Map<string, Tool>();
+  for (const message of context.messages) {
+    if (message.role !== "system") continue;
+    const text =
+      typeof message.content === "string" ? message.content : message.content.map((block) => block.text).join("\n");
+    if (text) content.push(text);
+    for (const [name, value] of Object.entries(message.sections ?? {})) {
+      if (value === null) sections.delete(name);
+      else sections.set(name, value);
+    }
+    for (const tool of message.toolsRemoved ?? []) tools.delete(tool.name);
+    for (const tool of message.toolsAdded ?? []) tools.set(tool.name, tool);
+  }
+  return {
+    systemPrompt: [...content, ...sections.values()].filter((text) => text.length > 0).join("\n\n"),
+    tools: [...tools.values()],
+    messages,
+  };
+}
 
 /** OpenAI-style tool definition sent to the Qoder API. */
 interface QoderTool {

@@ -35,11 +35,6 @@ vi.mock("../qoder-encoding.js", () => ({
   qoderEncodeBody: (body: Buffer) => body.toString("utf8"),
 }));
 
-vi.mock("../transform.js", () => ({
-  transformMessagesForQoder: (messages: unknown) => messages,
-  transformTools: (tools: unknown) => tools,
-}));
-
 import { streamQoder } from "../stream.js";
 
 const model = {
@@ -86,6 +81,147 @@ describe("streamQoder SSE handling", () => {
       machineID: "machine-id",
     });
     vi.stubGlobal("fetch", mocks.fetch);
+  });
+
+  function mockTextResponse() {
+    mocks.fetch.mockResolvedValue(responseWithSse(envelope({ choices: [{ delta: { content: "pong" } }] }), "[DONE]"));
+  }
+
+  function requestBody() {
+    return JSON.parse(mocks.fetch.mock.calls[0][1].body.toString("utf8"));
+  }
+
+  const bashTool = {
+    name: "bash",
+    description: "Run a command",
+    parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
+  };
+
+  it("sends prompt sections and tool declarations from the transcript to Qoder", async () => {
+    mockTextResponse();
+    const transcript = {
+      messages: [
+        {
+          role: "system",
+          content: "You are a coding agent.",
+          sections: { tools: "Use bash to execute commands.", rules: "Do not invent output." },
+          toolsAdded: [bashTool],
+          timestamp: 0,
+        },
+        { role: "user", content: [{ type: "text", text: "Run pwd" }], timestamp: 1 },
+      ],
+    } as unknown as Context;
+
+    const result = await streamQoder(model, transcript, options).result();
+
+    expect(result.stopReason).toBe("stop");
+    expect(requestBody()).toMatchObject({
+      system: "You are a coding agent.\n\nUse bash to execute commands.\n\nDo not invent output.",
+      tools: [{ type: "function", function: bashTool }],
+      messages: [{ role: "user", content: "Run pwd" }],
+    });
+  });
+
+  it("replays prompt changes and tool additions, replacements and removals", async () => {
+    mockTextResponse();
+    const updatedBash = { ...bashTool, description: "Run a read-only command" };
+    const readTool = { ...bashTool, name: "read", description: "Read a file" };
+    const transcript = {
+      messages: [
+        {
+          role: "system",
+          content: "Base prompt",
+          sections: { rules: "Old rules", obsolete: "Remove this" },
+          toolsAdded: [bashTool, readTool],
+          timestamp: 0,
+        },
+        { role: "user", content: "Run pwd", timestamp: 1 },
+        {
+          role: "system",
+          content: [{ type: "text", text: "Additional instructions" }],
+          sections: { rules: "New rules", obsolete: null },
+          toolsRemoved: [{ name: "bash" }, { name: "read" }],
+          toolsAdded: [updatedBash],
+          timestamp: 2,
+        },
+      ],
+    } as unknown as Context;
+
+    await streamQoder(model, transcript, options).result();
+
+    expect(requestBody()).toMatchObject({
+      system: "Base prompt\n\nAdditional instructions\n\nNew rules",
+      tools: [{ type: "function", function: updatedBash }],
+      messages: [{ role: "user", content: "Run pwd" }],
+    });
+  });
+
+  it("does not resurrect legacy tools after the transcript removes every tool", async () => {
+    mockTextResponse();
+    const transcript = {
+      systemPrompt: "Stale legacy prompt",
+      tools: [bashTool],
+      messages: [
+        { role: "system", content: "Current prompt", toolsAdded: [bashTool], timestamp: 0 },
+        { role: "system", content: "", toolsRemoved: [{ name: "bash" }], timestamp: 1 },
+        { role: "user", content: "ping", timestamp: 2 },
+      ],
+    } as unknown as Context;
+
+    await streamQoder(model, transcript, options).result();
+
+    expect(requestBody().system).toBe("Current prompt");
+    expect(requestBody().tools).toEqual([]);
+  });
+
+  it("keeps supporting the legacy top-level prompt and tools", async () => {
+    mockTextResponse();
+    const legacy = { ...context, systemPrompt: "Legacy instructions", tools: [bashTool] } as unknown as Context;
+
+    await streamQoder(model, legacy, options).result();
+
+    expect(requestBody()).toMatchObject({
+      system: "Legacy instructions",
+      tools: [{ type: "function", function: bashTool }],
+      messages: [{ role: "user", content: "ping" }],
+    });
+  });
+
+  it("preserves tool calls and results on the follow-up transcript request", async () => {
+    mockTextResponse();
+    const transcript = {
+      messages: [
+        { role: "system", content: "Use bash", toolsAdded: [bashTool], timestamp: 0 },
+        { role: "user", content: "Run pwd", timestamp: 1 },
+        {
+          role: "assistant",
+          content: [{ type: "toolCall", id: "call_pwd", name: "bash", arguments: { command: "pwd" } }],
+          stopReason: "toolUse",
+          timestamp: 2,
+        },
+        {
+          role: "toolResult",
+          toolCallId: "call_pwd",
+          toolName: "bash",
+          content: [{ type: "text", text: "/test/project" }],
+          isError: false,
+          timestamp: 3,
+        },
+      ],
+    } as unknown as Context;
+
+    await streamQoder(model, transcript, options).result();
+
+    expect(requestBody().tools).toEqual([{ type: "function", function: bashTool }]);
+    expect(requestBody().messages).toEqual([
+      { role: "user", content: "Run pwd" },
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [{ id: "call_pwd", type: "function", function: { name: "bash", arguments: '{"command":"pwd"}' } }],
+      },
+      { role: "tool", tool_call_id: "call_pwd", content: "/test/project" },
+    ]);
   });
 
   it("surfaces an upstream error envelope instead of returning an empty stop", async () => {

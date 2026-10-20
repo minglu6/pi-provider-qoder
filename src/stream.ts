@@ -3,7 +3,6 @@ import type {
   Api,
   AssistantMessage,
   AssistantMessageEventStream,
-  Context,
   Model,
   SimpleStreamOptions,
   TextContent,
@@ -33,7 +32,7 @@ import {
 import { resolveQoderIdentity } from "./oauth.js";
 import { qoderEncodeBody } from "./qoder-encoding.js";
 import { ThinkingTagParser } from "./thinking-parser.js";
-import { transformMessagesForQoder, transformTools } from "./transform.js";
+import { type QoderContext, resolveQoderContext, transformMessagesForQoder, transformTools } from "./transform.js";
 
 interface ToolCallState {
   arguments: string;
@@ -128,7 +127,7 @@ function stableChatRecordID(
 
 export function streamQoder(
   model: Model<Api>,
-  context: Context,
+  context: QoderContext,
   options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
   const StreamCtor = (PiAi as unknown as { AssistantMessageEventStream: new () => AssistantMessageEventStream })
@@ -194,8 +193,9 @@ export function streamQoder(
       const isReasoning = !!modelConfig.is_reasoning;
       const maxOutputTokens = modelConfig.max_output_tokens || 32768;
 
-      const normalizedMessages = transformMessagesForQoder(context.messages);
-      const systemText = context.systemPrompt || "";
+      const resolvedContext = resolveQoderContext(context);
+      const normalizedMessages = transformMessagesForQoder(resolvedContext.messages);
+      const systemText = resolvedContext.systemPrompt;
 
       let lastUserText = "";
       for (let i = normalizedMessages.length - 1; i >= 0; i--) {
@@ -221,7 +221,7 @@ export function streamQoder(
         maxTokens = options.maxTokens;
       }
 
-      const toolsRaw = context.tools && context.tools.length > 0 ? transformTools(context.tools) : undefined;
+      const toolsRaw = resolvedContext.tools.length > 0 ? transformTools(resolvedContext.tools) : undefined;
       const recordID = stableChatRecordID(qoderModel, normalizedMessages, toolsRaw, maxTokens);
 
       const reqBody: Record<string, unknown> = {
