@@ -31,6 +31,8 @@ import {
 } from "./models.js";
 import { resolveQoderIdentity } from "./oauth.js";
 import { qoderEncodeBody } from "./qoder-encoding.js";
+import { requestsSummary, withCheckpointRecovery } from "./response-guard.js";
+import { applyQoderUsage, type QoderTokenUsage, qoderStopReason } from "./stream-metadata.js";
 import { ThinkingTagParser } from "./thinking-parser.js";
 import { type QoderContext, resolveQoderContext, transformMessagesForQoder, transformTools } from "./transform.js";
 
@@ -58,6 +60,7 @@ interface QoderResponseDelta {
 
 interface QoderResponseChoice {
   delta?: QoderResponseDelta;
+  finish_reason?: string | null;
 }
 
 interface QoderSseEnvelope {
@@ -67,6 +70,7 @@ interface QoderSseEnvelope {
 
 interface QoderSseBody {
   choices?: QoderResponseChoice[];
+  usage?: QoderTokenUsage;
 }
 
 function parseToolCallArguments(state: ToolCallState): Record<string, unknown> {
@@ -101,34 +105,41 @@ function stableChatRecordID(
   messages: Array<{ role?: string; content?: unknown }>,
   tools: unknown,
   maxTokens: number,
+  sessionID: string,
+  system: string,
 ): string {
-  const hash = crypto.createHash("sha256");
-  hash.update("qoder-record");
-  hash.update("\0");
-  hash.update(model);
-  for (const msg of messages) {
-    if (msg?.role) {
-      hash.update("\0");
-      hash.update(msg.role);
-    }
-    if (msg?.content) {
-      hash.update("\0");
-      hash.update(typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content));
-    }
-  }
-  if (tools) {
-    hash.update("\0");
-    hash.update(JSON.stringify(tools));
-  }
-  hash.update("\0");
-  hash.update(`mt=${maxTokens}`);
-  return hash.digest("hex").slice(0, 16);
+  // Tool-call arguments, prompt changes and session identity are part of a
+  // request too; hashing only message.content aliases distinct requests.
+  return stableHash(
+    "qoder-record",
+    model,
+    sessionID,
+    system,
+    JSON.stringify(messages),
+    JSON.stringify(tools ?? []),
+    String(maxTokens),
+  );
 }
 
 export function streamQoder(
   model: Model<Api>,
   context: QoderContext,
   options?: SimpleStreamOptions,
+): AssistantMessageEventStream {
+  const resolved = resolveQoderContext(context);
+  const lastUser = [...resolved.messages].reverse().find((message) => message.role === "user");
+  const lastUserText = lastUser ? transformMessagesForQoder([lastUser])[0]?.content : "";
+  const requestedText = typeof lastUserText === "string" ? lastUserText : JSON.stringify(lastUserText ?? "");
+  // Host compaction is tool-free. Explicit user summaries must remain valid.
+  if (resolved.tools.length === 0 || requestsSummary(requestedText)) return streamQoderAttempt(model, context, options);
+  return withCheckpointRecovery((recovery) => streamQoderAttempt(model, context, options, recovery), options?.signal);
+}
+
+function streamQoderAttempt(
+  model: Model<Api>,
+  context: QoderContext,
+  options?: SimpleStreamOptions,
+  recovery = false,
 ): AssistantMessageEventStream {
   const StreamCtor = (PiAi as unknown as { AssistantMessageEventStream: new () => AssistantMessageEventStream })
     .AssistantMessageEventStream;
@@ -154,6 +165,7 @@ export function streamQoder(
 
   (async () => {
     try {
+      options?.signal?.throwIfAborted();
       const providerMode = model.provider === "qoder-cn" ? "cn" : getQoderMode();
       const accessToken = options?.apiKey;
       if (!accessToken) {
@@ -195,7 +207,9 @@ export function streamQoder(
 
       const resolvedContext = resolveQoderContext(context);
       const normalizedMessages = transformMessagesForQoder(resolvedContext.messages);
-      const systemText = resolvedContext.systemPrompt;
+      const systemText = recovery
+        ? `${resolvedContext.systemPrompt}\n\nThis is not a context-compaction request. Answer the latest user task using the supplied conversation and tool results. Do not replace the answer with an internal conversation checkpoint.`
+        : resolvedContext.systemPrompt;
 
       let lastUserText = "";
       for (let i = normalizedMessages.length - 1; i >= 0; i--) {
@@ -211,8 +225,6 @@ export function streamQoder(
         }
       }
 
-      const sessionID = stableHash("qoder-session", userID, qoderModel);
-
       let maxTokens = 32768;
       if (maxOutputTokens > 0) {
         maxTokens = maxOutputTokens;
@@ -222,7 +234,18 @@ export function streamQoder(
       }
 
       const toolsRaw = resolvedContext.tools.length > 0 ? transformTools(resolvedContext.tools) : undefined;
-      const recordID = stableChatRecordID(qoderModel, normalizedMessages, toolsRaw, maxTokens);
+      // Never share one remote conversation across every chat for this account.
+      // Tool-free one-off summarization has a separate prompt-scoped identity.
+      const sessionScope = recovery ? crypto.randomUUID() : options?.sessionId || crypto.randomUUID();
+      const sessionID = stableHash(
+        "qoder-session",
+        providerMode,
+        userID,
+        qoderModel,
+        sessionScope,
+        toolsRaw ? "agent" : systemText,
+      );
+      const recordID = stableChatRecordID(qoderModel, normalizedMessages, toolsRaw, maxTokens, sessionID, systemText);
 
       const reqBody: Record<string, unknown> = {
         request_id: crypto.randomUUID(),
@@ -291,7 +314,9 @@ export function streamQoder(
         );
       }
 
-      const bodyBytes = Buffer.from(JSON.stringify(reqBody));
+      const payload = (await options?.onPayload?.(reqBody, model)) ?? reqBody;
+      options?.signal?.throwIfAborted();
+      const bodyBytes = Buffer.from(JSON.stringify(payload));
       const encodedBody = qoderEncodeBody(bodyBytes);
       const encodedBytes = Buffer.from(encodedBody, "utf8");
 
@@ -322,6 +347,10 @@ export function streamQoder(
         body: encodedBytes,
         signal: options?.signal,
       });
+      await options?.onResponse?.(
+        { status: response.status, headers: Object.fromEntries(response.headers.entries()) },
+        model,
+      );
       await logCosyResponse(chatURL, response);
 
       if (!response.ok) {
@@ -333,6 +362,9 @@ export function streamQoder(
       if (!reader) throw new Error("No response body");
       const decoder = new TextDecoder();
       let buffer = "";
+      let completed = false;
+      let finishReason: string | undefined;
+      let usage: QoderTokenUsage = {};
 
       let contentBlockIndex = -1;
       let thinkingBlockIndex = -1;
@@ -343,149 +375,190 @@ export function streamQoder(
 
       stream.push({ type: "start", partial: output });
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      try {
+        while (!completed) {
+          const { done, value } = await reader.read();
+          buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
+          if (done && buffer && !buffer.endsWith("\n")) buffer += "\n";
 
-        buffer += decoder.decode(value, { stream: true });
+          while (true) {
+            const lineEnd = buffer.indexOf("\n");
+            if (lineEnd === -1) break;
 
-        while (true) {
-          const lineEnd = buffer.indexOf("\n");
-          if (lineEnd === -1) break;
+            const line = buffer.substring(0, lineEnd).trim();
+            buffer = buffer.substring(lineEnd + 1);
 
-          const line = buffer.substring(0, lineEnd).trim();
-          buffer = buffer.substring(lineEnd + 1);
+            if (!line.startsWith("data:")) continue;
 
-          if (!line.startsWith("data:")) continue;
+            const dataStr = line.substring(5).trim();
+            if (dataStr === "[DONE]") {
+              completed = true;
+              break;
+            }
 
-          const dataStr = line.substring(5).trim();
-          if (dataStr === "[DONE]") {
-            break;
-          }
+            let envelope: QoderSseEnvelope;
+            try {
+              envelope = JSON.parse(dataStr) as QoderSseEnvelope;
+            } catch {
+              throw new Error("Qoder SSE envelope is not valid JSON");
+            }
+            if (envelope.statusCodeValue && envelope.statusCodeValue !== 200) {
+              throw new Error(`Upstream status ${envelope.statusCodeValue}: ${envelope.body}`);
+            }
 
-          let envelope: QoderSseEnvelope;
-          try {
-            envelope = JSON.parse(dataStr) as QoderSseEnvelope;
-          } catch {
-            throw new Error("Qoder SSE envelope is not valid JSON");
-          }
-          if (envelope.statusCodeValue && envelope.statusCodeValue !== 200) {
-            throw new Error(`Upstream status ${envelope.statusCodeValue}: ${envelope.body}`);
-          }
+            const innerStr = envelope.body;
+            if (innerStr === "[DONE]") {
+              completed = true;
+              break;
+            }
+            if (!innerStr) continue;
 
-          const innerStr = envelope.body;
-          if (!innerStr || innerStr === "[DONE]") continue;
+            let inner: QoderSseBody;
+            try {
+              inner = JSON.parse(String(innerStr)) as QoderSseBody;
+            } catch {
+              throw new Error("Qoder SSE response body is not valid JSON");
+            }
+            // Optional on modern Pi, absent from older SDK typings. No payloads
+            // are logged by the provider; inspection is explicitly host-controlled.
+            const observer = (
+              options as
+                | (SimpleStreamOptions & {
+                    onProviderStreamEvent?: (event: unknown, model: Model<Api>) => void | Promise<void>;
+                  })
+                | undefined
+            )?.onProviderStreamEvent;
+            await observer?.(inner, model);
+            if (inner.usage) {
+              usage = {
+                ...usage,
+                ...inner.usage,
+                prompt_tokens_details: {
+                  ...usage.prompt_tokens_details,
+                  ...inner.usage.prompt_tokens_details,
+                },
+              };
+              applyQoderUsage(output, usage, model);
+            }
+            if (inner.choices && inner.choices.length > 0) {
+              const choice = inner.choices[0];
+              if (typeof choice.finish_reason === "string") finishReason = choice.finish_reason;
+              const delta = choice.delta;
 
-          let inner: QoderSseBody;
-          try {
-            inner = JSON.parse(String(innerStr)) as QoderSseBody;
-          } catch {
-            throw new Error("Qoder SSE response body is not valid JSON");
-          }
-          if (inner.choices && inner.choices.length > 0) {
-            const choice = inner.choices[0];
-            const delta = choice.delta;
-
-            if (delta) {
-              // 1. Process reasoning/thinking content (API reasoning)
-              if (delta.reasoning_content) {
-                if (thinkingBlockIndex === -1) {
-                  thinkingBlockIndex = output.content.length;
-                  output.content.push({ type: "thinking", thinking: "" });
-                  stream.push({ type: "thinking_start", contentIndex: thinkingBlockIndex, partial: output });
-                }
-                const block = output.content[thinkingBlockIndex] as ThinkingContent;
-                block.thinking += delta.reasoning_content;
-                stream.push({
-                  type: "thinking_delta",
-                  contentIndex: thinkingBlockIndex,
-                  delta: delta.reasoning_content,
-                  partial: output,
-                });
-              }
-
-              // 2. Process text content
-              if (delta.content) {
-                // End API thinking block if active
-                if (thinkingBlockIndex !== -1) {
+              if (delta) {
+                // 1. Process reasoning/thinking content (API reasoning)
+                if (delta.reasoning_content) {
+                  if (thinkingBlockIndex === -1) {
+                    thinkingBlockIndex = output.content.length;
+                    output.content.push({ type: "thinking", thinking: "" });
+                    stream.push({ type: "thinking_start", contentIndex: thinkingBlockIndex, partial: output });
+                  }
                   const block = output.content[thinkingBlockIndex] as ThinkingContent;
+                  block.thinking += delta.reasoning_content;
                   stream.push({
-                    type: "thinking_end",
+                    type: "thinking_delta",
                     contentIndex: thinkingBlockIndex,
-                    content: block.thinking,
-                    partial: output,
-                  });
-                  thinkingBlockIndex = -1;
-                }
-
-                if (thinkingParser) {
-                  thinkingParser.processChunk(delta.content);
-                } else {
-                  if (contentBlockIndex === -1) {
-                    contentBlockIndex = output.content.length;
-                    output.content.push({ type: "text", text: "" });
-                    stream.push({ type: "text_start", contentIndex: contentBlockIndex, partial: output });
-                  }
-                  const block = output.content[contentBlockIndex] as TextContent;
-                  block.text += delta.content;
-                  stream.push({
-                    type: "text_delta",
-                    contentIndex: contentBlockIndex,
-                    delta: delta.content,
+                    delta: delta.reasoning_content,
                     partial: output,
                   });
                 }
-              }
 
-              // 3. Process tool calls
-              if (delta.tool_calls && Array.isArray(delta.tool_calls)) {
-                for (const tc of delta.tool_calls) {
-                  const idx = tc.index ?? 0;
-                  let state = toolCallsState.get(idx);
-                  if (!state) {
-                    state = {
-                      arguments: "",
-                      id: tc.id || "",
-                      name: tc.function?.name || "",
-                      contentIndex: output.content.length,
-                    };
-                    toolCallsState.set(idx, state);
-                    output.content.push({
-                      type: "toolCall",
-                      id: state.id,
-                      name: state.name,
-                      arguments: {},
+                // 2. Process text content
+                if (delta.content) {
+                  // End API thinking block if active
+                  if (thinkingBlockIndex !== -1) {
+                    const block = output.content[thinkingBlockIndex] as ThinkingContent;
+                    stream.push({
+                      type: "thinking_end",
+                      contentIndex: thinkingBlockIndex,
+                      content: block.thinking,
+                      partial: output,
                     });
-                    stream.push({ type: "toolcall_start", contentIndex: state.contentIndex, partial: output });
+                    thinkingBlockIndex = -1;
                   }
 
-                  const block = output.content[state.contentIndex] as ToolCall;
-                  if (tc.id) {
-                    state.id = tc.id;
-                    block.id = tc.id;
+                  if (thinkingParser) {
+                    thinkingParser.processChunk(delta.content);
+                  } else {
+                    if (contentBlockIndex === -1) {
+                      contentBlockIndex = output.content.length;
+                      output.content.push({ type: "text", text: "" });
+                      stream.push({ type: "text_start", contentIndex: contentBlockIndex, partial: output });
+                    }
+                    const block = output.content[contentBlockIndex] as TextContent;
+                    block.text += delta.content;
+                    stream.push({
+                      type: "text_delta",
+                      contentIndex: contentBlockIndex,
+                      delta: delta.content,
+                      partial: output,
+                    });
                   }
-                  if (tc.function?.name) {
-                    state.name = tc.function.name;
-                    block.name = tc.function.name;
-                  }
+                }
 
-                  const argDelta = tc.function?.arguments || "";
-                  state.arguments += argDelta;
-                  stream.push({
-                    type: "toolcall_delta",
-                    contentIndex: state.contentIndex,
-                    delta: argDelta,
-                    partial: output,
-                  });
+                // 3. Process tool calls
+                if (delta.tool_calls && Array.isArray(delta.tool_calls)) {
+                  for (const tc of delta.tool_calls) {
+                    const idx = tc.index ?? 0;
+                    let state = toolCallsState.get(idx);
+                    if (!state) {
+                      state = {
+                        arguments: "",
+                        id: tc.id || "",
+                        name: tc.function?.name || "",
+                        contentIndex: output.content.length,
+                      };
+                      toolCallsState.set(idx, state);
+                      output.content.push({
+                        type: "toolCall",
+                        id: state.id,
+                        name: state.name,
+                        arguments: {},
+                      });
+                      stream.push({ type: "toolcall_start", contentIndex: state.contentIndex, partial: output });
+                    }
+
+                    const block = output.content[state.contentIndex] as ToolCall;
+                    if (tc.id) {
+                      state.id = tc.id;
+                      block.id = tc.id;
+                    }
+                    if (tc.function?.name) {
+                      state.name = tc.function.name;
+                      block.name = tc.function.name;
+                    }
+
+                    const argDelta = tc.function?.arguments || "";
+                    state.arguments += argDelta;
+                    stream.push({
+                      type: "toolcall_delta",
+                      contentIndex: state.contentIndex,
+                      delta: argDelta,
+                      partial: output,
+                    });
+                  }
                 }
               }
             }
           }
+          if (done) break;
         }
+      } finally {
+        await reader.cancel().catch(() => {});
+        reader.releaseLock();
       }
+      options?.signal?.throwIfAborted();
+      if (!completed && !finishReason) throw new Error("Qoder stream ended without a completion marker");
 
       if (thinkingParser) {
         thinkingParser.finalize();
+      } else if (contentBlockIndex !== -1) {
+        stream.push({
+          type: "text_end",
+          contentIndex: contentBlockIndex,
+          content: (output.content[contentBlockIndex] as TextContent).text,
+          partial: output,
+        });
       }
 
       if (thinkingBlockIndex !== -1) {
@@ -519,12 +592,8 @@ export function streamQoder(
         throw new Error("Qoder upstream completed without assistant content");
       }
 
-      if (toolCallsState.size > 0) {
-        output.stopReason = "toolUse";
-      } else {
-        output.stopReason = "stop";
-      }
-      stream.push({ type: "done", reason: output.stopReason as "stop" | "toolUse", message: output });
+      output.stopReason = qoderStopReason(finishReason, toolCallsState.size > 0);
+      stream.push({ type: "done", reason: output.stopReason, message: output });
       stream.end();
     } catch (e: unknown) {
       output.stopReason = options?.signal?.aborted ? "aborted" : "error";

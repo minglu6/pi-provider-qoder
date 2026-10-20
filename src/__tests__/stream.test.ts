@@ -224,6 +224,399 @@ describe("streamQoder SSE handling", () => {
     ]);
   });
 
+  // Sanitized shape of the incident: an unrequested checkpoint was returned
+  // as normal assistant content, despite the last user asking for diagnosis.
+  const checkpoint = `<analysis>Review the conversation so far.</analysis>
+<summary>
+1. Primary Request and Intent: diagnose a skill collision.
+2. Key Technical Concepts: skills.
+3. Files and Code Sections: SKILL.md.
+4. Pending Tasks: answer the user.
+5. Current Work: investigation.
+</summary>`;
+  const agentContext = { ...context, tools: [bashTool] } as unknown as Context;
+
+  function textResponse(text: string) {
+    return responseWithSse(envelope({ choices: [{ delta: { content: text }, finish_reason: "stop" }] }), "[DONE]");
+  }
+
+  it("quarantines an unsolicited checkpoint and retries the original request once in a fresh session", async () => {
+    mocks.fetch
+      .mockResolvedValueOnce(textResponse(checkpoint))
+      .mockResolvedValueOnce(textResponse("Use the first skill."));
+    const stream = streamQoder(model, agentContext, { ...options, sessionId: "chat-a" });
+    const events = [];
+    for await (const event of stream) events.push(event);
+    const result = await stream.result();
+
+    expect(result.stopReason).toBe("stop");
+    expect(result.content).toEqual([{ type: "text", text: "Use the first skill." }]);
+    expect(events.filter((e) => e.type === "start")).toHaveLength(1);
+    expect(events.filter((e) => e.type === "done")).toHaveLength(1);
+    expect(JSON.stringify(events)).not.toContain("Review the conversation");
+    expect(mocks.fetch).toHaveBeenCalledTimes(2);
+    const [first, retry] = mocks.fetch.mock.calls.map((call) => JSON.parse(call[1].body.toString("utf8")));
+    expect(retry.messages).toEqual(first.messages);
+    expect(retry.tools).toEqual(first.tools);
+    expect(retry.system).toContain("not a context-compaction request");
+    expect(retry.session_id).not.toBe(first.session_id);
+    expect(retry.chat_record_id).not.toBe(first.chat_record_id);
+  });
+
+  it("does not leak the checkpoint in text deltas even when every character is a separate SSE delta", async () => {
+    mocks.fetch
+      .mockResolvedValueOnce(
+        responseWithSse(
+          ...Array.from(checkpoint, (content) => envelope({ choices: [{ delta: { content } }] })),
+          "[DONE]",
+        ),
+      )
+      .mockResolvedValueOnce(textResponse("fixed"));
+    const events = [];
+    for await (const event of streamQoder(model, agentContext, options)) events.push(event);
+    expect(
+      events
+        .filter((e) => e.type === "text_delta")
+        .map((e) => e.delta)
+        .join(""),
+    ).toBe("fixed");
+    expect(mocks.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("fails explicitly after a second unsolicited checkpoint, without a retry loop or fake overflow", async () => {
+    mocks.fetch.mockImplementation(() => textResponse(checkpoint));
+    const result = await streamQoder(model, agentContext, options).result();
+    expect(mocks.fetch).toHaveBeenCalledTimes(2);
+    expect(result.stopReason).toBe("error");
+    expect(result.errorMessage).toContain("QODER_UNEXPECTED_SUMMARY");
+    expect(result.errorMessage).not.toContain("context_length_exceeded");
+    expect(result.content).toEqual([]);
+  });
+
+  it("recognizes the Chinese checkpoint headings from the incident", async () => {
+    const chinese =
+      "<analysis>会话梳理</analysis><summary>1. 主要请求与意图：排查\n2. 关键技术概念：技能\n3. 文件与代码段：文件\n4. 待办任务：回答</summary>";
+    mocks.fetch.mockResolvedValueOnce(textResponse(chinese)).mockResolvedValueOnce(textResponse("正常答复"));
+    const result = await streamQoder(model, agentContext, options).result();
+    expect(result.content).toEqual([{ type: "text", text: "正常答复" }]);
+    expect(mocks.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    "Summarize our conversation",
+    "请总结这次排查",
+    "输出 <summary> 格式",
+  ])("preserves explicitly requested summaries: %s", async (content) => {
+    mocks.fetch.mockResolvedValue(textResponse(checkpoint));
+    const result = await streamQoder(
+      model,
+      { ...agentContext, messages: [{ role: "user", content }] } as unknown as Context,
+      options,
+    ).result();
+    expect(result.stopReason).toBe("stop");
+    expect(result.content).toEqual([{ type: "text", text: checkpoint }]);
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves tool-free host compaction requests alone", async () => {
+    mocks.fetch.mockResolvedValue(textResponse(checkpoint));
+    const result = await streamQoder(model, context, options).result();
+    expect(result.content).toEqual([{ type: "text", text: checkpoint }]);
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    "Here is an XML example: <analysis>text</analysis><summary>example</summary>",
+    "<analysis>Consider the evidence.</analysis>The first skill wins.",
+    "<summary>A short ordinary summary.</summary>",
+  ])("does not drop ordinary answers or XML examples: %s", async (text) => {
+    mocks.fetch.mockResolvedValue(textResponse(text));
+    const result = await streamQoder(model, agentContext, options).result();
+    expect(result.content).toEqual([{ type: "text", text }]);
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry a quarantined response after cancellation", async () => {
+    const controller = new AbortController();
+    mocks.fetch.mockImplementation(() => {
+      controller.abort();
+      return textResponse(checkpoint);
+    });
+    const result = await streamQoder(model, agentContext, { ...options, signal: controller.signal }).result();
+    expect(result.stopReason).toBe("aborted");
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+    expect(result.content).toEqual([]);
+  });
+
+  it("isolates remote conversations while retaining affinity inside one host session", async () => {
+    mocks.fetch.mockImplementation(() => textResponse("pong"));
+    for (const sessionId of ["chat-a", "chat-a", "chat-b", undefined, undefined]) {
+      await streamQoder(model, agentContext, { ...options, sessionId }).result();
+    }
+    const ids = mocks.fetch.mock.calls.map((call) => JSON.parse(call[1].body.toString("utf8")).session_id);
+    expect(ids[0]).toBe(ids[1]);
+    expect(new Set([ids[0], ...ids.slice(2)]).size).toBe(4);
+  });
+
+  it("separates host compaction from tool-enabled chat even with the same sessionId", async () => {
+    mocks.fetch.mockImplementation(() => textResponse("pong"));
+    await streamQoder(model, agentContext, { ...options, sessionId: "chat-a" }).result();
+    await streamQoder(model, context, { ...options, sessionId: "chat-a" }).result();
+    const ids = mocks.fetch.mock.calls.map((call) => JSON.parse(call[1].body.toString("utf8")).session_id);
+    expect(ids[0]).not.toBe(ids[1]);
+  });
+
+  it("reads usage-only terminal chunks, splits cached input, and computes cost without double counting snapshots", async () => {
+    mocks.fetch.mockResolvedValue(
+      responseWithSse(
+        envelope({ choices: [{ delta: { content: "pong" } }], usage: { prompt_tokens: 100, completion_tokens: 2 } }),
+        envelope({
+          choices: [],
+          usage: {
+            prompt_tokens: 100,
+            completion_tokens: 10,
+            total_tokens: 110,
+            prompt_tokens_details: { cached_tokens: 40 },
+          },
+        }),
+        "[DONE]",
+      ),
+    );
+    const priced = { ...model, cost: { input: 1, output: 2, cacheRead: 0.5, cacheWrite: 1 } };
+    const result = await streamQoder(priced, context, options).result();
+    expect(result.usage).toMatchObject({ input: 60, output: 10, cacheRead: 40, cacheWrite: 0, totalTokens: 110 });
+    expect(result.usage.cost.total).toBeCloseTo(0.0001);
+  });
+
+  it("merges partial usage snapshots and supports DeepSeek cache fields", async () => {
+    mocks.fetch.mockResolvedValue(
+      responseWithSse(
+        envelope({
+          choices: [{ delta: { content: "pong" } }],
+          usage: { prompt_tokens: 100, prompt_cache_hit_tokens: 40, prompt_cache_miss_tokens: 60 },
+        }),
+        envelope({ usage: { completion_tokens: 10 } }),
+        "[DONE]",
+      ),
+    );
+    const result = await streamQoder(model, context, options).result();
+    expect(result.usage).toMatchObject({ input: 60, output: 10, cacheRead: 40, totalTokens: 110 });
+  });
+
+  it("preserves length termination rather than falsely reporting success", async () => {
+    mocks.fetch.mockResolvedValue(
+      responseWithSse(envelope({ choices: [{ delta: { content: "partial" }, finish_reason: "length" }] }), "[DONE]"),
+    );
+    const result = await streamQoder(model, context, options).result();
+    expect(result.stopReason).toBe("length");
+  });
+
+  it("rejects an unsupported finish reason rather than reporting a normal stop", async () => {
+    mocks.fetch.mockResolvedValue(
+      responseWithSse(
+        envelope({ choices: [{ delta: { content: "partial" }, finish_reason: "content_filter" }] }),
+        "[DONE]",
+      ),
+    );
+    const result = await streamQoder(model, context, options).result();
+    expect(result.stopReason).toBe("error");
+    expect(result.errorMessage).toContain("content_filter");
+  });
+
+  it("processes the final SSE line without a trailing newline", async () => {
+    mocks.fetch.mockResolvedValue(
+      new Response(
+        `data: ${envelope({ choices: [{ delta: { content: "pong" }, finish_reason: "stop" }], usage: { prompt_tokens: 9, completion_tokens: 1 } })}`,
+      ),
+    );
+    const result = await streamQoder(model, context, options).result();
+    expect(result.stopReason).toBe("stop");
+    expect(result.content).toEqual([{ type: "text", text: "pong" }]);
+    expect(result.usage.totalTokens).toBe(10);
+  });
+
+  it("does not accept a disconnected stream as a successful answer", async () => {
+    mocks.fetch.mockResolvedValue(responseWithSse(envelope({ choices: [{ delta: { content: "partial" } }] })));
+    const result = await streamQoder(model, context, options).result();
+    expect(result.stopReason).toBe("error");
+    expect(result.errorMessage).toContain("without a completion marker");
+  });
+
+  it("stops reading at DONE instead of parsing subsequent transport garbage", async () => {
+    mocks.fetch.mockResolvedValue(
+      responseWithSse(envelope({ choices: [{ delta: { content: "pong" } }] }), "[DONE]", "{invalid"),
+    );
+    const result = await streamQoder(model, context, options).result();
+    expect(result.stopReason).toBe("stop");
+  });
+
+  it("retries a truncated checkpoint without leaking its partial summary", async () => {
+    mocks.fetch
+      .mockResolvedValueOnce(
+        responseWithSse(
+          envelope({
+            choices: [{ delta: { content: checkpoint.replace("</summary>", "") }, finish_reason: "length" }],
+          }),
+          "[DONE]",
+        ),
+      )
+      .mockResolvedValueOnce(textResponse("normal answer"));
+    const result = await streamQoder(model, agentContext, options).result();
+    expect(result.content).toEqual([{ type: "text", text: "normal answer" }]);
+    expect(mocks.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not retry rate limits, and emits only one error after a failed recovery request", async () => {
+    mocks.fetch
+      .mockResolvedValueOnce(textResponse(checkpoint))
+      .mockResolvedValueOnce(responseWithSse(envelope("rate limited", 429)));
+    const events = [];
+    const stream = streamQoder(model, agentContext, options);
+    for await (const event of stream) events.push(event);
+    const result = await stream.result();
+    expect(mocks.fetch).toHaveBeenCalledTimes(2);
+    expect(result.stopReason).toBe("error");
+    expect(result.errorMessage).toContain("429");
+    expect(events.filter((e) => e.type === "error")).toHaveLength(1);
+    expect(events.filter((e) => e.type === "done")).toHaveLength(0);
+    expect(JSON.stringify(events)).not.toContain("Review the conversation");
+  });
+
+  it("recovery preserves prior tool results and returns a new tool call only once", async () => {
+    mocks.fetch.mockResolvedValueOnce(textResponse(checkpoint)).mockResolvedValueOnce(
+      responseWithSse(
+        envelope({
+          choices: [
+            {
+              delta: {
+                tool_calls: [{ index: 0, id: "new_call", function: { name: "bash", arguments: '{"command":"pwd"}' } }],
+              },
+              finish_reason: "tool_calls",
+            },
+          ],
+        }),
+        "[DONE]",
+      ),
+    );
+    const history = {
+      ...agentContext,
+      messages: [
+        ...context.messages,
+        {
+          role: "assistant",
+          content: [{ type: "toolCall", id: "old_call", name: "bash", arguments: { command: "ls" } }],
+          stopReason: "toolUse",
+        },
+        {
+          role: "toolResult",
+          toolCallId: "old_call",
+          toolName: "bash",
+          content: [{ type: "text", text: "already executed" }],
+          isError: false,
+        },
+      ],
+    } as unknown as Context;
+    const stream = streamQoder(model, history, options);
+    const events = [];
+    for await (const event of stream) events.push(event);
+    expect(events.filter((e) => e.type === "toolcall_end")).toHaveLength(1);
+    expect((await stream.result()).stopReason).toBe("toolUse");
+    const bodies = mocks.fetch.mock.calls.map((call) => JSON.parse(call[1].body.toString("utf8")));
+    expect(bodies[1].messages).toEqual(bodies[0].messages);
+    expect(bodies[1].messages.at(-1)).toMatchObject({
+      role: "tool",
+      tool_call_id: "old_call",
+      content: "already executed",
+    });
+  });
+
+  it("does not leak native thinking or partial snapshots from a rejected attempt", async () => {
+    mocks.fetch
+      .mockResolvedValueOnce(
+        responseWithSse(
+          envelope({ choices: [{ delta: { reasoning_content: "discarded attempt reasoning" } }] }),
+          envelope({ choices: [{ delta: { content: checkpoint } }] }),
+          "[DONE]",
+        ),
+      )
+      .mockResolvedValueOnce(textResponse("normal answer"));
+    const events = [];
+    for await (const event of streamQoder(model, agentContext, { ...options, reasoning: "high" })) events.push(event);
+    expect(JSON.stringify(events)).not.toContain("discarded attempt");
+    expect(JSON.stringify(events)).not.toContain("Review the conversation");
+    expect(events.filter((e) => e.type === "start")).toHaveLength(1);
+  });
+
+  it("invokes host request/response/event inspection hooks without enabling provider logging", async () => {
+    const inner = { choices: [{ delta: { content: "pong" }, finish_reason: "stop" }] };
+    mocks.fetch.mockResolvedValue(responseWithSse(envelope(inner), "[DONE]"));
+    const order: string[] = [];
+    const onPayload = vi.fn((payload: unknown) => {
+      order.push("payload");
+      return { ...(payload as object), test_marker: true };
+    });
+    const onResponse = vi.fn(() => {
+      order.push("response");
+    });
+    const onProviderStreamEvent = vi.fn(() => {
+      order.push("event");
+    });
+    const result = await streamQoder(model, context, {
+      ...options,
+      onPayload,
+      onResponse,
+      onProviderStreamEvent,
+    } as SimpleStreamOptions).result();
+    expect(result.stopReason).toBe("stop");
+    expect(requestBody().test_marker).toBe(true);
+    expect(order).toEqual(["payload", "response", "event"]);
+    expect(onProviderStreamEvent).toHaveBeenCalledWith(inner, model);
+  });
+
+  it("includes system prompt and tool-call arguments in request identity", async () => {
+    mocks.fetch.mockImplementation(() => textResponse("pong"));
+    for (const [systemPrompt, command] of [
+      ["rules-a", "pwd"],
+      ["rules-b", "pwd"],
+      ["rules-b", "ls"],
+    ]) {
+      const ctx = {
+        ...agentContext,
+        systemPrompt,
+        messages: [
+          ...context.messages,
+          {
+            role: "assistant",
+            content: [{ type: "toolCall", id: "c1", name: "bash", arguments: { command } }],
+            stopReason: "toolUse",
+          },
+        ],
+      } as unknown as Context;
+      await streamQoder(model, ctx, { ...options, sessionId: "same-chat" }).result();
+    }
+    const ids = mocks.fetch.mock.calls.map((call) => JSON.parse(call[1].body.toString("utf8")).chat_record_id);
+    expect(new Set(ids).size).toBe(3);
+  });
+
+  it("decodes UTF-8 across byte boundaries and accepts an inner DONE sentinel", async () => {
+    const bytes = new TextEncoder().encode(
+      `data: ${envelope({ choices: [{ delta: { content: "正常答复" } }] })}\n\ndata: ${envelope("[DONE]")}`,
+    );
+    mocks.fetch.mockResolvedValue(
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            for (const byte of bytes) controller.enqueue(new Uint8Array([byte]));
+            controller.close();
+          },
+        }),
+      ),
+    );
+    const result = await streamQoder(model, agentContext, options).result();
+    expect(result.stopReason).toBe("stop");
+    expect(result.content).toEqual([{ type: "text", text: "正常答复" }]);
+  });
+
   it("surfaces an upstream error envelope instead of returning an empty stop", async () => {
     mocks.fetch.mockResolvedValue(responseWithSse(envelope("rate limited", 429)));
 

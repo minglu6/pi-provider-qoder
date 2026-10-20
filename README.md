@@ -192,6 +192,14 @@ Use a PAT created by the VPC tenant (for example from `https://<instance>.vpc.qo
 
 For safe request diagnostics, set `QODER_COSY_DEBUG=1`. Logs include the URL, status, and non-secret COSY signature inputs, but never credentials, Authorization, `Cosy-Key`, or machine identifiers.
 
+## Stream safety and diagnostics
+
+- Remote session IDs are scoped to the host's `sessionId`, account, region and model, not shared across every chat. Calls without a host session ID get a fresh remote session. Tool-free summarization is separated from tool-enabled chat.
+- Token usage is read from upstream snapshots, including usage-only terminal chunks and cached prompt tokens. Missing usage is not fabricated. `length`, errors and disconnected streams are no longer reported as a successful `stop`.
+- For tool-enabled tasks, the provider quarantines the specific unsolicited `<analysis>…</analysis><summary>…</summary>` conversation-checkpoint scaffold (at least three recognized English/Chinese checkpoint headings). It retries generation **once** with the original messages/tools in a fresh remote session; it never replays the discarded checkpoint or executes tools itself. If recovery fails, `QODER_UNEXPECTED_SUMMARY` is explicit, not a fake context-overflow error. Recovery may incur one additional model request.
+- This is a narrow output safeguard, not proof of an upstream compaction bug or a general XML filter. Tool-free host compactions, explicit summary requests and ordinary XML examples are preserved. While the response prefix is undecided, reasoning/events are buffered; ordinary text or a tool call resumes streaming.
+- The provider honors host `onPayload`, `onResponse`, and (when available) `onProviderStreamEvent` inspection hooks. No prompt, response or credential logging is enabled automatically. Use opt-in inspection carefully; these hooks can expose sensitive conversation data.
+
 ## Endpoints
 
 **Global:**
