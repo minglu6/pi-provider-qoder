@@ -9,6 +9,7 @@ import type {
   ToolCall,
 } from "@earendil-works/pi-ai";
 import * as PiAi from "@earendil-works/pi-ai";
+import { isQoderAuthExpired, QoderAuthExpiredError, type RenewQoderAccess } from "./auth-recovery.js";
 import {
   buildAuthHeaders,
   formatQoderHttpError,
@@ -124,14 +125,18 @@ export function streamQoder(
   model: Model<Api>,
   context: QoderContext,
   options?: SimpleStreamOptions,
+  renewAccess?: RenewQoderAccess,
 ): AssistantMessageEventStream {
+  const auth = { renewAccess, retried: false, accessToken: options?.apiKey };
+  const attempt = (recovery?: ResponseRecoveryReason) =>
+    streamQoderAttempt(model, context, { ...options, apiKey: auth.accessToken }, recovery, auth);
   const resolved = resolveQoderContext(context);
   const lastUser = [...resolved.messages].reverse().find((message) => message.role === "user");
   const lastUserText = lastUser ? transformMessagesForQoder([lastUser])[0]?.content : "";
   const requestedText = typeof lastUserText === "string" ? lastUserText : JSON.stringify(lastUserText ?? "");
   // Host compaction is tool-free. Explicit user summaries must remain valid.
-  if (resolved.tools.length === 0 || requestsSummary(requestedText)) return streamQoderAttempt(model, context, options);
-  return withResponseRecovery((recovery) => streamQoderAttempt(model, context, options, recovery), options?.signal);
+  if (resolved.tools.length === 0 || requestsSummary(requestedText)) return attempt();
+  return withResponseRecovery(attempt, options?.signal);
 }
 
 function streamQoderAttempt(
@@ -139,6 +144,7 @@ function streamQoderAttempt(
   context: QoderContext,
   options?: SimpleStreamOptions,
   recovery?: ResponseRecoveryReason,
+  auth?: { renewAccess?: RenewQoderAccess; retried: boolean; accessToken?: string },
 ): AssistantMessageEventStream {
   const StreamCtor = (PiAi as unknown as { AssistantMessageEventStream: new () => AssistantMessageEventStream })
     .AssistantMessageEventStream;
@@ -163,6 +169,7 @@ function streamQoderAttempt(
   };
 
   (async () => {
+    let started = false;
     try {
       options?.signal?.throwIfAborted();
       const providerMode = model.provider === "qoder-cn" ? "cn" : getQoderMode();
@@ -358,10 +365,16 @@ function streamQoderAttempt(
 
       if (!response.ok) {
         const errText = await response.text();
+        if (isQoderAuthExpired(response.status, errText)) {
+          throw new QoderAuthExpiredError(
+            formatQoderHttpError("api", response.status, response.statusText, errText, chatURL),
+          );
+        }
         throw new Error(formatQoderHttpError("api", response.status, response.statusText, errText, chatURL));
       }
 
       const reader = response.body?.getReader();
+      // The upstream gateway can return authentication errors inside HTTP 200 SSE.
       if (!reader) throw new Error("No response body");
       const decoder = new TextDecoder();
       let buffer = "";
@@ -376,6 +389,7 @@ function streamQoderAttempt(
       const thinkingParser = new ThinkingTagParser(output, stream);
 
       stream.push({ type: "start", partial: output });
+      started = true;
 
       try {
         while (!completed) {
@@ -405,6 +419,9 @@ function streamQoderAttempt(
               throw new Error("Qoder SSE envelope is not valid JSON");
             }
             if (envelope.statusCodeValue && envelope.statusCodeValue !== 200) {
+              if (isQoderAuthExpired(envelope.statusCodeValue, envelope.body ?? "")) {
+                throw new QoderAuthExpiredError(`Upstream status ${envelope.statusCodeValue}: ${envelope.body}`);
+              }
               throw new Error(`Upstream status ${envelope.statusCodeValue}: ${envelope.body}`);
             }
 
@@ -586,8 +603,30 @@ function streamQoderAttempt(
       stream.push({ type: "done", reason: output.stopReason, message: output });
       stream.end();
     } catch (e: unknown) {
+      let failure = e;
+      if (
+        e instanceof QoderAuthExpiredError &&
+        auth?.renewAccess &&
+        !auth.retried &&
+        output.content.length === 0 &&
+        !options?.signal?.aborted
+      ) {
+        auth.retried = true;
+        try {
+          auth.accessToken = await auth.renewAccess(options?.apiKey ?? "", options?.sessionId);
+          options?.signal?.throwIfAborted();
+          const retry = streamQoderAttempt(model, context, { ...options, apiKey: auth.accessToken }, recovery, auth);
+          for await (const event of retry) {
+            if (event.type !== "start" || !started) stream.push(event);
+          }
+          stream.end();
+          return;
+        } catch (renewalError) {
+          failure = renewalError;
+        }
+      }
       output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-      output.errorMessage = e instanceof Error ? e.message : String(e);
+      output.errorMessage = failure instanceof Error ? failure.message : String(failure);
       stream.push({ type: "error", reason: output.stopReason, error: output });
       try {
         stream.end();

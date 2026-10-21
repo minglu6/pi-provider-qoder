@@ -1,5 +1,6 @@
 import type { Api, Model, OAuthCredentials } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ProviderConfig } from "@earendil-works/pi-coding-agent";
+import { createQoderAuthRecovery, type RenewQoderAccess } from "./auth-recovery.js";
 import {
   getQoderBaseUrl,
   getQoderMode,
@@ -87,14 +88,20 @@ function modelConfigForProvider(
   };
 }
 
-function registerQoderProvider(pi: ExtensionAPI, providerID: string, mode: string): void {
+function registerQoderProvider(
+  pi: ExtensionAPI,
+  providerID: string,
+  mode: string,
+  renewAccess: RenewQoderAccess,
+): void {
   pi.registerProvider(providerID, {
     ...modelConfigForProvider(mode, providerID),
-    streamSimple: streamQoder,
+    streamSimple: (model, context, options) => streamQoder(model, context, options, renewAccess),
   });
 }
 
 export default function (pi: ExtensionAPI) {
+  const renewers = new Map<string, RenewQoderAccess>();
   // Refresh the models cache once per session at startup if it is missing or
   // stale (>1h old), rather than on every message in the stream hot path.
   // Login/refresh are the other rebuild triggers; this covers the case where
@@ -104,6 +111,10 @@ export default function (pi: ExtensionAPI) {
       ["qoder", getQoderMode()],
       ["qoder-cn", "cn"],
     ] as const) {
+      // Pi 1.x moved credential ownership into runtime; older Pi and OMP expose authStorage.
+      const owner = "runtime" in ctx.modelRegistry ? ctx.modelRegistry.runtime : ctx.modelRegistry.authStorage;
+      const authOwner = owner as Parameters<typeof createQoderAuthRecovery>[0];
+      renewers.set(providerID, createQoderAuthRecovery(authOwner, providerID));
       try {
         const accessToken = await ctx.modelRegistry.getApiKeyForProvider(providerID);
         if (!accessToken || !isCacheStale(mode)) continue;
@@ -124,6 +135,14 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  registerQoderProvider(pi, "qoder", getQoderMode());
-  registerQoderProvider(pi, "qoder-cn", "cn");
+  for (const [providerID, mode] of [
+    ["qoder", getQoderMode()],
+    ["qoder-cn", "cn"],
+  ] as const) {
+    registerQoderProvider(pi, providerID, mode, async (accessToken, sessionId) => {
+      const renew = renewers.get(providerID);
+      if (!renew) throw new Error("Qoder authentication recovery requires an initialized host session.");
+      return renew(accessToken, sessionId);
+    });
+  }
 }

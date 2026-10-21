@@ -146,6 +146,7 @@ Qoder PAT（`pt-...`）不能直接调 API。本扩展会把它兑换成短期 j
 登录成功后，PAT 自动保存在 **macOS 钥匙串 / Windows 凭据管理器 / Linux Secret Service**；**Android/Termux 使用上述私有明文文件**。各平台均按 OpenAPI 地址和账号隔离；`auth.json` 仍只保存短期令牌和 JRT，不保存明文 PAT。
 
 - 日常使用优先通过 `POST /api/v1/jobToken/refresh` 续期。JRT 明确过期或失效后，自动读取已保存的 PAT 重新兑换，不需要配置 PAT 环境变量。
+- 请求遇到明确登录过期错误（包括 HTTP 200 的 SSE 内包裹 `403 / code 105 / Login expired`）时，由宿主续期并保存凭据，仅在尚未输出助手内容或工具调用时重试一次；并发失败共用续期。普通权限错误、已输出部分内容及已取消的请求不重放。支持 Pi 1.x runtime、旧版 Pi AuthStorage 和 OMP 凭据接口。
 - 网络异常、限流和服务端 5xx 保留错误，不会自动改用 PAT，也不会一律要求重新登录。PAT 本身被服务端拒绝后，才需重新 `/login` 更新密钥。
 - 升级前的 JRT-only 登录没有保存 PAT：升级并重启 Pi 后，需要再登录一次。旧版曾内嵌 PAT 的凭据会在成功续期时迁移到当前平台的凭据存储。
 - 桌面/服务器平台需要安装可选依赖，并确保系统凭据库可用且已解锁；Linux 需要持久化 Secret Service（如 GNOME Keyring / KWallet）。原生库缺失或凭据库锁定时不会静默降级为明文文件；Android 明确使用文件存储。保存失败会报错，不会声称登录已完成。

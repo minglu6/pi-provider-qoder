@@ -1,4 +1,5 @@
 import type { OAuthCredentials } from "@earendil-works/pi-ai";
+import { isQoderAuthExpired } from "./auth-recovery.js";
 import {
   formatQoderHttpError,
   getMachineId,
@@ -54,10 +55,7 @@ export class QoderTokenError extends Error {
         : `Qoder job token refresh failed: ${status} ${statusText}. Response: ${safeBody.replace(/\s+/g, " ").slice(0, 200)}`,
     );
     this.name = "QoderTokenError";
-    this.requiresReauthentication =
-      status === 401 ||
-      ((status === 400 || status === 403) &&
-        /\b(?:ExpiredTokenError|InvalidTokenError|InvalidRefreshTokenError|TOKEN_EXPIRED?)\b/.test(body));
+    this.requiresReauthentication = isQoderAuthExpired(status, body);
   }
 }
 

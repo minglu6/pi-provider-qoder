@@ -642,6 +642,71 @@ describe("streamQoder SSE handling", () => {
     expect(result.content).toEqual([]);
   });
 
+  it.each(["sse", "http"])("renews an expired login from %s once before returning content", async (transport) => {
+    const body = JSON.stringify({ code: "105", message: "Login expired" });
+    mocks.fetch.mockResolvedValueOnce(
+      transport === "sse" ? responseWithSse(envelope(body, 403)) : new Response(body, { status: 403 }),
+    );
+    mocks.fetch.mockResolvedValueOnce(
+      responseWithSse(envelope({ choices: [{ delta: { content: "recovered" } }] }), "[DONE]"),
+    );
+    const renew = vi.fn().mockResolvedValue("renewed-token");
+    const stream = streamQoder(model, context, options, renew);
+    const events = [];
+    for await (const event of stream) events.push(event);
+    const result = await stream.result();
+    expect(result.stopReason).toBe("stop");
+    expect(result.content).toEqual([{ type: "text", text: "recovered" }]);
+    expect(events.filter((event) => event.type === "start")).toHaveLength(1);
+    expect(events.some((event) => event.type === "error")).toBe(false);
+    expect(renew).toHaveBeenCalledTimes(1);
+    expect(mocks.resolveQoderIdentity.mock.calls.map((call) => call[0])).toEqual(["access-token", "renewed-token"]);
+  });
+
+  it("stops after a second expired-login response", async () => {
+    mocks.fetch.mockImplementation(() => responseWithSse(envelope({ code: 105, message: "Login expired" }, 403)));
+    const renew = vi.fn().mockResolvedValue("renewed-token");
+    const result = await streamQoder(model, context, options, renew).result();
+    expect(result.stopReason).toBe("error");
+    expect(mocks.fetch).toHaveBeenCalledTimes(2);
+    expect(renew).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { content: "already delivered" },
+    { reasoning_content: "already thinking" },
+    { tool_calls: [{ index: 0, id: "c1", function: { name: "bash", arguments: "{}" } }] },
+  ])("does not replay a response after assistant output: %j", async (delta) => {
+    mocks.fetch.mockResolvedValue(
+      responseWithSse(envelope({ choices: [{ delta }] }), envelope({ code: 105, message: "Login expired" }, 403)),
+    );
+    const renew = vi.fn();
+    const result = await streamQoder(model, context, options, renew).result();
+    expect(result.stopReason).toBe("error");
+    expect(renew).not.toHaveBeenCalled();
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([403, 429, 503])("does not renew unrelated HTTP %s failures", async (status) => {
+    mocks.fetch.mockResolvedValue(new Response("Permission denied", { status }));
+    const renew = vi.fn();
+    expect((await streamQoder(model, context, options, renew).result()).stopReason).toBe("error");
+    expect(renew).not.toHaveBeenCalled();
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry if cancelled during renewal", async () => {
+    const controller = new AbortController();
+    mocks.fetch.mockResolvedValue(responseWithSse(envelope({ code: 105, message: "Login expired" }, 403)));
+    const renew = vi.fn(async () => {
+      controller.abort();
+      return "renewed-token";
+    });
+    const result = await streamQoder(model, context, { ...options, signal: controller.signal }, renew).result();
+    expect(result.stopReason).toBe("aborted");
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+  });
+
   it("surfaces malformed envelope JSON instead of returning an empty stop", async () => {
     mocks.fetch.mockResolvedValue(responseWithSse("{not-json"));
 

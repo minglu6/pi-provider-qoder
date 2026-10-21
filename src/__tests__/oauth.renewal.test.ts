@@ -149,6 +149,17 @@ describe("saved PAT recovery", () => {
     expect((await refreshQoderTokenCN(expire(creds))).access).toBe("jt-recovered");
   });
 
+  it("recovers a JRT rejected with code 105 through the saved PAT", async () => {
+    const creds = await login();
+    refreshStatus = 403;
+    refreshBody = JSON.stringify({ code: "105", message: "Login expired" });
+    exchangePats = [];
+    const recovered = await refreshQoderTokenCN(expire(creds));
+    expect(recovered.access).toBe("jt-recovered");
+    expect(recovered.refresh).toBe("jrt|jrt-recovered|account-a|test-machine");
+    expect(exchangePats).toEqual(["pt-saved-account-a"]);
+  });
+
   it.each([403, 429, 503])("does not exchange a PAT for an unrelated HTTP %s failure", async (status) => {
     const creds = await login();
     refreshStatus = status;
