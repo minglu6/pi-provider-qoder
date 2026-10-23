@@ -84,7 +84,8 @@ export async function loadQoderPat(userID: string, mode: string): Promise<string
     }
     const secret = await (await patEntry(userID, mode)).getSecret();
     // Native backends may return null although the TypeScript binding declares undefined.
-    return secret == null ? undefined : Buffer.from(secret).toString("utf8");
+    // Windows setPassword stores UTF-16LE; the other native backends use UTF-8.
+    return secret == null ? undefined : Buffer.from(secret).toString(process.platform === "win32" ? "utf16le" : "utf8");
   } catch {
     if (process.platform === "android") {
       throw new Error(

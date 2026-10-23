@@ -150,6 +150,7 @@ Qoder PAT（`pt-...`）不能直接调 API。本扩展会把它兑换成短期 j
 - 网络异常、限流和服务端 5xx 保留错误，不会自动改用 PAT，也不会一律要求重新登录。PAT 本身被服务端拒绝后，才需重新 `/login` 更新密钥。
 - 升级前的 JRT-only 登录没有保存 PAT：升级并重启 Pi 后，需要再登录一次。旧版曾内嵌 PAT 的凭据会在成功续期时迁移到当前平台的凭据存储。
 - 桌面/服务器平台需要安装可选依赖，并确保系统凭据库可用且已解锁；Linux 需要持久化 Secret Service（如 GNOME Keyring / KWallet）。原生库缺失或凭据库锁定时不会静默降级为明文文件；Android 明确使用文件存储。保存失败会报错，不会声称登录已完成。
+- 已保存 PAT 按原生密码编码读取：Windows 使用 UTF-16LE，macOS/Linux 使用 UTF-8；凭据库访问失败仍明确报错，不当作未保存。Windows SSH 登录会话可能无法访问 Credential Manager，认证操作应在已登录桌面会话中执行。
 - `/logout` 删除宿主登录状态，但 Pi 的插件接口没有退出登录回调，因此不会删除已保存的 PAT；插件不会仅凭该 PAT 自动重新登录。彻底移除时，在系统凭据管理器中删除服务名为 `pi-qoder-provider:<OpenAPI 地址>`、账号为对应 userID 的条目；Android 上删除 `qoder-pats/` 会清除该 agent 目录下所有账号保存的 PAT。需要吊销访问权限时，在 Qoder 控制台撤销 PAT。
 
 **PAT 和企业 VPC 配置均可通过一次交互登录保存，无需任何 Qoder 环境变量。** PAT 使用当前平台对应的存储，非敏感实例配置另存本地文件。
