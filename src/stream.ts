@@ -220,6 +220,10 @@ function streamQoderAttempt(
             ? "\n\nThis is not a context-compaction request. Answer the latest user task using the supplied conversation and tool results. Do not replace the answer with an internal conversation checkpoint."
             : "";
       const systemText = resolvedContext.systemPrompt + recoveryInstruction;
+      // The gateway forwards OpenAI-style messages, not the top-level system field.
+      const messages = systemText
+        ? [{ role: "system", content: systemText }, ...normalizedMessages]
+        : normalizedMessages;
 
       let lastUserText = "";
       for (let i = normalizedMessages.length - 1; i >= 0; i--) {
@@ -255,7 +259,7 @@ function streamQoderAttempt(
         sessionScope,
         toolsRaw ? "agent" : systemText,
       );
-      const recordID = stableChatRecordID(qoderModel, normalizedMessages, toolsRaw, maxTokens, sessionID, systemText);
+      const recordID = stableChatRecordID(qoderModel, messages, toolsRaw, maxTokens, sessionID, systemText);
 
       const reqBody: Record<string, unknown> = {
         request_id: crypto.randomUUID(),
@@ -275,8 +279,7 @@ function streamQoderAttempt(
         chat_prompt: "",
         image_urls: null,
         aliyun_user_type: "",
-        system: systemText,
-        messages: normalizedMessages,
+        messages,
         tools: toolsRaw || [],
         parameters: {
           max_tokens: maxTokens,

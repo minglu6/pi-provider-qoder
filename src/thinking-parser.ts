@@ -12,6 +12,9 @@ const THINKING_TAG_VARIANTS: Array<{ open: string; close: string }> = [
   { open: "<thought>", close: "</thought>" },
 ];
 const THINKING_OPEN_TAGS = THINKING_TAG_VARIANTS.map((variant) => variant.open);
+const DSML_PREFIXES = ["<｜DSML｜", "<｜｜DSML｜｜", "</｜DSML｜", "</｜｜DSML｜｜"];
+const UNPARSED_TOOL_CALL =
+  "QODER_UNPARSED_TOOL_CALL: Qoder returned raw DSML instead of structured tool_calls; no tool call was accepted.";
 
 function getTrailingPossibleTagPrefixLength(text: string, tag: string): number {
   const maxPrefixLength = Math.min(text.length, tag.length - 1);
@@ -33,6 +36,7 @@ export class ThinkingTagParser {
   private textBuffer = "";
   private inThinking = false;
   private thinkingSeen = false;
+  private publicTextSeen = false;
   private thinkingBlockIndex: number | null = null;
   private textBlockIndex: number | null = null;
   private lastTextBlockIndex: number | null = null;
@@ -60,6 +64,14 @@ export class ThinkingTagParser {
     if (this.inThinking) {
       this.emitThinking(this.textBuffer);
     } else {
+      const prefix = this.textBuffer.trimStart();
+      if (
+        !this.publicTextSeen &&
+        prefix.includes("DSML") &&
+        DSML_PREFIXES.some((marker) => marker.startsWith(prefix))
+      ) {
+        throw new Error(UNPARSED_TOOL_CALL);
+      }
       this.emitText(this.textBuffer);
     }
     this.textBuffer = "";
@@ -80,6 +92,14 @@ export class ThinkingTagParser {
   }
 
   private processBeforeThinking(): void {
+    if (!this.publicTextSeen) {
+      const prefix = this.textBuffer.trimStart();
+      if (DSML_PREFIXES.some((marker) => prefix.startsWith(marker))) {
+        throw new Error(UNPARSED_TOOL_CALL);
+      }
+      // Hold only an undecided leading protocol token, not quoted examples.
+      if (DSML_PREFIXES.some((marker) => marker.startsWith(prefix))) return;
+    }
     let bestPos = -1;
     let bestVariant: (typeof THINKING_TAG_VARIANTS)[number] | null = null;
     for (const variant of THINKING_TAG_VARIANTS) {
@@ -152,6 +172,7 @@ export class ThinkingTagParser {
 
   private emitText(text: string): void {
     if (!text) return;
+    if (text.trim()) this.publicTextSeen = true;
     if (this.textBlockIndex === null) {
       this.textBlockIndex = this.output.content.length;
       this.output.content.push({ type: "text", text: "" });

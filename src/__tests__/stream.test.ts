@@ -116,9 +116,14 @@ describe("streamQoder SSE handling", () => {
 
     expect(result.stopReason).toBe("stop");
     expect(requestBody()).toMatchObject({
-      system: "You are a coding agent.\n\nUse bash to execute commands.\n\nDo not invent output.",
       tools: [{ type: "function", function: bashTool }],
-      messages: [{ role: "user", content: "Run pwd" }],
+      messages: [
+        {
+          role: "system",
+          content: "You are a coding agent.\n\nUse bash to execute commands.\n\nDo not invent output.",
+        },
+        { role: "user", content: "Run pwd" },
+      ],
     });
   });
 
@@ -150,9 +155,11 @@ describe("streamQoder SSE handling", () => {
     await streamQoder(model, transcript, options).result();
 
     expect(requestBody()).toMatchObject({
-      system: "Base prompt\n\nAdditional instructions\n\nNew rules",
       tools: [{ type: "function", function: updatedBash }],
-      messages: [{ role: "user", content: "Run pwd" }],
+      messages: [
+        { role: "system", content: "Base prompt\n\nAdditional instructions\n\nNew rules" },
+        { role: "user", content: "Run pwd" },
+      ],
     });
   });
 
@@ -170,7 +177,7 @@ describe("streamQoder SSE handling", () => {
 
     await streamQoder(model, transcript, options).result();
 
-    expect(requestBody().system).toBe("Current prompt");
+    expect(requestBody().messages[0]).toEqual({ role: "system", content: "Current prompt" });
     expect(requestBody().tools).toEqual([]);
   });
 
@@ -181,9 +188,11 @@ describe("streamQoder SSE handling", () => {
     await streamQoder(model, legacy, options).result();
 
     expect(requestBody()).toMatchObject({
-      system: "Legacy instructions",
       tools: [{ type: "function", function: bashTool }],
-      messages: [{ role: "user", content: "ping" }],
+      messages: [
+        { role: "system", content: "Legacy instructions" },
+        { role: "user", content: "ping" },
+      ],
     });
   });
 
@@ -196,7 +205,10 @@ describe("streamQoder SSE handling", () => {
     ).result();
 
     expect(result.stopReason).toBe("stop");
-    expect(requestBody().system).toBe("Base instructions\n\nWorkspace instructions");
+    expect(requestBody().messages[0]).toEqual({
+      role: "system",
+      content: "Base instructions\n\nWorkspace instructions",
+    });
   });
 
   it("preserves tool calls and results on the follow-up transcript request", async () => {
@@ -226,6 +238,7 @@ describe("streamQoder SSE handling", () => {
 
     expect(requestBody().tools).toEqual([{ type: "function", function: bashTool }]);
     expect(requestBody().messages).toEqual([
+      { role: "system", content: "Use bash" },
       { role: "user", content: "Run pwd" },
       {
         role: "assistant",
@@ -252,6 +265,68 @@ describe("streamQoder SSE handling", () => {
     return responseWithSse(envelope({ choices: [{ delta: { content: text }, finish_reason: "stop" }] }), "[DONE]");
   }
 
+  it.each([
+    "<｜｜DSML｜｜ calls>",
+    "<｜DSML｜ calls>",
+    "<｜DSML｜tool_calls>",
+    '<｜｜DSML｜｜ invoke name="respond">',
+    "<｜DSML",
+    " \n</｜｜DSML｜",
+  ])("rejects raw DSML as a protocol error instead of a successful title: %s", async (text) => {
+    mocks.fetch.mockResolvedValue(textResponse(text));
+    const stream = streamQoder(model, context, options);
+    const events = [];
+    for await (const event of stream) events.push(event);
+    const result = await stream.result();
+
+    expect(result.stopReason).toBe("error");
+    expect(result.errorMessage).toContain("QODER_UNPARSED_TOOL_CALL");
+    expect(result.content).toEqual([]);
+    expect(events.some((event) => event.type === "text_delta" || event.type === "done")).toBe(false);
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("holds fragmented DSML after reasoning without leaking it or inventing a tool call", async () => {
+    mocks.fetch.mockImplementation(() =>
+      responseWithSse(
+        ...Array.from("<think>Choose a title.</think>\n<｜｜DSML｜｜ calls>", (content) =>
+          envelope({ choices: [{ delta: { content } }] }),
+        ),
+        "[DONE]",
+      ),
+    );
+    const stream = streamQoder(model, agentContext, options);
+    const events = [];
+    for await (const event of stream) events.push(event);
+    const result = await stream.result();
+
+    expect(result.stopReason).toBe("error");
+    expect(result.errorMessage).toContain("QODER_UNPARSED_TOOL_CALL");
+    expect(events.some((event) => event.type === "toolcall_start" || event.type === "done")).toBe(false);
+    expect(
+      events
+        .filter((event) => event.type === "text_delta")
+        .map((event) => event.delta)
+        .join("")
+        .trim(),
+    ).toBe("");
+    expect(JSON.stringify(result.content)).not.toContain("DSML");
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    "The marker <｜｜DSML｜｜ calls> belongs to the tool protocol.",
+    "```xml\n<｜DSML｜tool_calls>\n```",
+    "<summary>DSML <｜｜DSML｜｜ calls> example</summary>",
+    "<",
+    " \n",
+  ])("preserves protocol explanations and quoted examples: %s", async (text) => {
+    mocks.fetch.mockResolvedValue(textResponse(text));
+    const result = await streamQoder(model, context, options).result();
+    expect(result.stopReason).toBe("stop");
+    expect(result.content).toEqual([{ type: "text", text }]);
+  });
+
   it("quarantines an unsolicited checkpoint and retries the original request once in a fresh session", async () => {
     mocks.fetch
       .mockResolvedValueOnce(textResponse(checkpoint))
@@ -268,9 +343,12 @@ describe("streamQoder SSE handling", () => {
     expect(JSON.stringify(events)).not.toContain("Review the conversation");
     expect(mocks.fetch).toHaveBeenCalledTimes(2);
     const [first, retry] = mocks.fetch.mock.calls.map((call) => JSON.parse(call[1].body.toString("utf8")));
-    expect(retry.messages).toEqual(first.messages);
+    expect(retry.messages.slice(1)).toEqual(first.messages);
     expect(retry.tools).toEqual(first.tools);
-    expect(retry.system).toContain("not a context-compaction request");
+    expect(retry.messages[0]).toMatchObject({
+      role: "system",
+      content: expect.stringContaining("not a context-compaction request"),
+    });
     expect(retry.session_id).not.toBe(first.session_id);
     expect(retry.chat_record_id).not.toBe(first.chat_record_id);
   });
@@ -537,7 +615,7 @@ describe("streamQoder SSE handling", () => {
     expect(events.filter((e) => e.type === "toolcall_end")).toHaveLength(1);
     expect((await stream.result()).stopReason).toBe("toolUse");
     const bodies = mocks.fetch.mock.calls.map((call) => JSON.parse(call[1].body.toString("utf8")));
-    expect(bodies[1].messages).toEqual(bodies[0].messages);
+    expect(bodies[1].messages.slice(1)).toEqual(bodies[0].messages);
     expect(bodies[1].messages.at(-1)).toMatchObject({
       role: "tool",
       tool_call_id: "old_call",
@@ -755,9 +833,12 @@ describe("streamQoder SSE handling", () => {
     expect(JSON.stringify(events)).not.toContain("Let me");
     expect(mocks.fetch).toHaveBeenCalledTimes(2);
     const [first, retry] = mocks.fetch.mock.calls.map((call) => JSON.parse(call[1].body.toString("utf8")));
-    expect(retry.messages).toEqual(first.messages);
+    expect(retry.messages.slice(1)).toEqual(first.messages);
     expect(retry.tools).toEqual(first.tools);
-    expect(retry.system).toContain("Return a user-facing answer or a real tool call");
+    expect(retry.messages[0]).toMatchObject({
+      role: "system",
+      content: expect.stringContaining("Return a user-facing answer or a real tool call"),
+    });
     expect(retry.session_id).not.toBe(first.session_id);
     expect(retry.chat_record_id).not.toBe(first.chat_record_id);
   });
