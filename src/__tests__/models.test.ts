@@ -1,12 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  applyQoderThinkingOptions,
   deriveQoderThinking,
   deriveQoderThinkingLevelMap,
   qoderModelIdentity,
-  resolveRequestedThinkingEffort,
   staticCnModels,
   staticModels,
-  withQoderThinkingEffort,
   ZERO_COST,
 } from "../models.js";
 
@@ -160,54 +159,166 @@ describe("deriveQoderThinkingLevelMap", () => {
     });
   });
 
-  it("returns undefined without an efforts surface", () => {
-    expect(deriveQoderThinkingLevelMap({ key: "auto", thinking_config: { enabled: {} } }, true)).toBeUndefined();
+  it("does not invent effort levels for toggle-only catalogs", () => {
+    expect(
+      deriveQoderThinkingLevelMap(
+        { key: "auto", thinking_config: { disabled: {}, enabled: { is_default: true } } },
+        true,
+      ),
+    ).toBeUndefined();
+    expect(deriveQoderThinkingLevelMap({ key: "auto" }, true)).toBeUndefined();
+  });
+
+  it("does not expose off when the catalog cannot disable thinking", () => {
+    const map = deriveQoderThinkingLevelMap({ thinking_config: { enabled: { efforts: { high: {} } } } }, true);
+    expect(map?.off).toBeNull();
+    expect(map?.high).toBe("high");
+  });
+
+  it("returns undefined for non-reasoning models", () => {
+    expect(
+      deriveQoderThinkingLevelMap({ thinking_config: { disabled: {}, enabled: { efforts: { high: {} } } } }, false),
+    ).toBeUndefined();
   });
 });
 
-describe("resolveRequestedThinkingEffort", () => {
-  it("accepts any non-toggle effort string from the host", () => {
-    expect(resolveRequestedThinkingEffort("high")).toBe("high");
-    expect(resolveRequestedThinkingEffort("xhigh")).toBe("xhigh");
-    expect(resolveRequestedThinkingEffort("medium")).toBe("medium");
-  });
-
-  it("ignores thinking toggles that are not effort labels", () => {
-    expect(resolveRequestedThinkingEffort(true)).toBeUndefined();
-    expect(resolveRequestedThinkingEffort(false)).toBeUndefined();
-    expect(resolveRequestedThinkingEffort("off")).toBeUndefined();
-    expect(resolveRequestedThinkingEffort("")).toBeUndefined();
-  });
-});
-
-describe("withQoderThinkingEffort", () => {
-  const entry = {
+describe("applyQoderThinkingOptions", () => {
+  const entry = Object.freeze({
     key: "dfmodel",
     is_reasoning: false,
-    thinking_config: {
-      disabled: { is_default: true },
-      enabled: {
+    source: "system",
+    thinking_config: Object.freeze({
+      disabled: Object.freeze({ is_default: true, description: "No thinking" }),
+      enabled: Object.freeze({
         is_default: false,
-        efforts: {
-          high: { description: "High", is_default: true },
-          max: { description: "Maximum" },
-        },
-      },
-    },
-  };
-
-  it("selects max explicitly and enables reasoning", () => {
-    const configured = withQoderThinkingEffort(entry, "max");
-    expect(configured.is_reasoning).toBe(true);
-    expect(configured.thinking_config?.disabled?.is_default).toBe(false);
-    expect(configured.thinking_config?.enabled?.is_default).toBe(true);
-    expect(configured.thinking_config?.enabled?.efforts?.high?.is_default).toBe(false);
-    expect(configured.thinking_config?.enabled?.efforts?.max?.is_default).toBe(true);
+        description: "Thinking",
+        efforts: Object.freeze({
+          high: Object.freeze({ description: "High", is_default: true }),
+          max: Object.freeze({ description: "Maximum", is_default: false }),
+        }),
+      }),
+    }),
   });
 
-  it("leaves the entry unchanged when the effort is unsupported", () => {
-    expect(withQoderThinkingEffort(entry, "ultra")).toBe(entry);
-    expect(withQoderThinkingEffort(entry, "xhigh")).toBe(entry);
+  it("keeps the catalog default when reasoning is undefined", () => {
+    expect(applyQoderThinkingOptions(entry, undefined)).toEqual({ modelConfig: entry });
+    expect(applyQoderThinkingOptions(entry, undefined).modelConfig).toBe(entry);
+  });
+
+  it.each([false, "off"])("explicitly disables thinking for %s", (reasoning) => {
+    const enabledEntry = {
+      ...entry,
+      is_reasoning: true,
+      thinking_config: {
+        disabled: { ...entry.thinking_config.disabled, is_default: false },
+        enabled: { ...entry.thinking_config.enabled, is_default: true },
+      },
+    };
+    const result = applyQoderThinkingOptions(enabledEntry, reasoning);
+    expect(result.modelConfig.is_reasoning).toBe(false);
+    expect(result.modelConfig.thinking_config?.disabled?.is_default).toBe(true);
+    expect(result.modelConfig.thinking_config?.enabled?.is_default).toBe(false);
+    expect(result.modelConfig.thinking_config?.enabled?.efforts).toBe(entry.thinking_config.enabled.efforts);
+    expect(result).not.toHaveProperty("effort");
+    expect(enabledEntry.thinking_config.enabled.is_default).toBe(true);
+  });
+
+  it("explicitly enables thinking without selecting a different effort", () => {
+    const result = applyQoderThinkingOptions(entry, true);
+    expect(result.modelConfig.is_reasoning).toBe(true);
+    expect(result.modelConfig.thinking_config?.disabled?.is_default).toBe(false);
+    expect(result.modelConfig.thinking_config?.enabled?.is_default).toBe(true);
+    expect(result.modelConfig.thinking_config?.enabled?.efforts).toBe(entry.thinking_config.enabled.efforts);
+    expect(result).not.toHaveProperty("effort");
+  });
+
+  it("selects a supported effort and enables thinking", () => {
+    const result = applyQoderThinkingOptions(entry, "max");
+    expect(result.effort).toBe("max");
+    expect(result.modelConfig.is_reasoning).toBe(true);
+    expect(result.modelConfig.thinking_config?.disabled?.is_default).toBe(false);
+    expect(result.modelConfig.thinking_config?.enabled?.is_default).toBe(true);
+    expect(result.modelConfig.thinking_config?.enabled?.efforts).toEqual({
+      high: { description: "High", is_default: false },
+      max: { description: "Maximum", is_default: true },
+    });
+  });
+
+  it.each([
+    "ultra",
+    "xhigh",
+    "constructor",
+    "toString",
+    "true",
+    "false",
+    "",
+  ])("retains the catalog default for unsupported effort %s", (reasoning) => {
+    const result = applyQoderThinkingOptions(entry, reasoning);
+    expect(result.modelConfig).toBe(entry);
+    expect(result).not.toHaveProperty("effort");
+  });
+
+  it("enables toggle-only catalogs without inventing efforts or disabled mode", () => {
+    const result = applyQoderThinkingOptions(
+      { is_reasoning: false, thinking_config: { enabled: { is_default: false } } },
+      true,
+    );
+    expect(result).toEqual({
+      modelConfig: { is_reasoning: true, thinking_config: { enabled: { is_default: true } } },
+    });
+  });
+
+  it("selects effort without inventing a disabled capability", () => {
+    const result = applyQoderThinkingOptions({ thinking_config: { enabled: { efforts: { high: {} } } } }, "high");
+    expect(result.effort).toBe("high");
+    expect(result.modelConfig.thinking_config).not.toHaveProperty("disabled");
+    expect(result.modelConfig.thinking_config?.enabled?.is_default).toBe(true);
+  });
+
+  it("disables a disabled-only catalog without inventing an enabled capability", () => {
+    const result = applyQoderThinkingOptions(
+      { is_reasoning: true, thinking_config: { disabled: { is_default: false } } },
+      false,
+    );
+    expect(result).toEqual({
+      modelConfig: { is_reasoning: false, thinking_config: { disabled: { is_default: true } } },
+    });
+  });
+
+  it.each([false, "off"])("rejects %s when the catalog cannot disable thinking", (reasoning) => {
+    expect(() => applyQoderThinkingOptions({ key: "always-on", thinking_config: { enabled: {} } }, reasoning)).toThrow(
+      'Qoder model "always-on" does not support disabling thinking.',
+    );
+  });
+
+  it("rejects true when the catalog cannot enable thinking", () => {
+    expect(() => applyQoderThinkingOptions({ key: "always-off", thinking_config: { disabled: {} } }, true)).toThrow(
+      'Qoder model "always-off" does not support enabling thinking.',
+    );
+  });
+
+  it("keeps unknown catalog defaults but rejects unsupported explicit toggles", () => {
+    const unknownEntry = { key: "unknown", is_reasoning: false };
+    expect(applyQoderThinkingOptions(unknownEntry, undefined).modelConfig).toBe(unknownEntry);
+    expect(applyQoderThinkingOptions(unknownEntry, "high").modelConfig).toBe(unknownEntry);
+    for (const reasoning of [false, "off", true]) {
+      expect(() => applyQoderThinkingOptions(unknownEntry, reasoning)).toThrow(/does not support/);
+    }
+  });
+
+  it("does not mutate frozen catalog modes, effort defaults, or metadata", () => {
+    const configured = applyQoderThinkingOptions(entry, "max").modelConfig;
+    expect(configured).not.toBe(entry);
+    expect(configured.thinking_config).not.toBe(entry.thinking_config);
+    expect(configured.thinking_config?.enabled?.efforts).not.toBe(entry.thinking_config.enabled.efforts);
+    expect(configured.source).toBe("system");
+    expect(configured.thinking_config?.disabled?.description).toBe("No thinking");
+    expect(configured.thinking_config?.enabled?.description).toBe("Thinking");
+    expect(entry.is_reasoning).toBe(false);
+    expect(entry.thinking_config.disabled.is_default).toBe(true);
+    expect(entry.thinking_config.enabled.is_default).toBe(false);
+    expect(entry.thinking_config.enabled.efforts.high.is_default).toBe(true);
+    expect(entry.thinking_config.enabled.efforts.max.is_default).toBe(false);
   });
 });
 

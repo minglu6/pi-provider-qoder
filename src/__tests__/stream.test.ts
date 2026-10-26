@@ -1,9 +1,11 @@
 import type { Api, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type * as Models from "../models.js";
 
 const mocks = vi.hoisted(() => ({
   fetch: vi.fn(),
   resolveQoderIdentity: vi.fn(),
+  getCachedModelConfig: vi.fn(),
 }));
 
 vi.mock("../cosy.js", () => ({
@@ -11,6 +13,7 @@ vi.mock("../cosy.js", () => ({
   formatQoderHttpError: (_scope: string, status: number, statusText: string) => `${status} ${statusText}`,
   getMachineId: () => "machine-id",
   getQoderChatURL: () => "https://qoder.example.test/chat",
+  getQoderBaseUrl: () => "https://qoder.example.test/",
   getQoderCNDirectModel: (id: string) => id,
   getQoderMode: () => "cn",
   getQoderUserEmailFallback: () => "user@example.test",
@@ -19,12 +22,9 @@ vi.mock("../cosy.js", () => ({
   logCosyResponse: vi.fn(),
 }));
 
-vi.mock("../models.js", () => ({
-  getCachedModelConfig: () => undefined,
-  resolveRequestedThinkingEffort: (reasoning: unknown) =>
-    typeof reasoning === "string" && reasoning !== "off" && reasoning.length > 0 ? reasoning : undefined,
-  qoderSupportsThinkingEffort: () => false,
-  withQoderThinkingEffort: (config: unknown) => config,
+vi.mock("../models.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof Models>()),
+  getCachedModelConfig: mocks.getCachedModelConfig,
 }));
 
 vi.mock("../oauth.js", () => ({
@@ -57,7 +57,6 @@ const context = {
 
 const options = {
   apiKey: "access-token",
-  reasoning: false,
 } as unknown as SimpleStreamOptions;
 
 function responseWithSse(...data: string[]): Response {
@@ -74,6 +73,7 @@ function envelope(body: unknown, statusCodeValue = 200): string {
 describe("streamQoder SSE handling", () => {
   beforeEach(() => {
     mocks.fetch.mockReset();
+    mocks.getCachedModelConfig.mockReset().mockReturnValue(undefined);
     mocks.resolveQoderIdentity.mockReset().mockResolvedValue({
       userID: "user-id",
       name: "User",
@@ -249,8 +249,6 @@ describe("streamQoder SSE handling", () => {
     ]);
   });
 
-  // Sanitized shape of the incident: an unrequested checkpoint was returned
-  // as normal assistant content, despite the last user asking for diagnosis.
   const checkpoint = `<analysis>Review the conversation so far.</analysis>
 <summary>
 1. Primary Request and Intent: diagnose a skill collision.
@@ -266,51 +264,56 @@ describe("streamQoder SSE handling", () => {
   }
 
   it.each([
-    "<｜｜DSML｜｜ calls>",
-    "<｜DSML｜ calls>",
-    "<｜DSML｜tool_calls>",
-    '<｜｜DSML｜｜ invoke name="respond">',
-    "<｜DSML",
-    " \n</｜｜DSML｜",
-  ])("rejects raw DSML as a protocol error instead of a successful title: %s", async (text) => {
-    mocks.fetch.mockResolvedValue(textResponse(text));
-    const stream = streamQoder(model, context, options);
-    const events = [];
-    for await (const event of stream) events.push(event);
-    const result = await stream.result();
-
-    expect(result.stopReason).toBe("error");
-    expect(result.errorMessage).toContain("QODER_UNPARSED_TOOL_CALL");
-    expect(result.content).toEqual([]);
-    expect(events.some((event) => event.type === "text_delta" || event.type === "done")).toBe(false);
-    expect(mocks.fetch).toHaveBeenCalledTimes(1);
-  });
-
-  it("holds fragmented DSML after reasoning without leaking it or inventing a tool call", async () => {
-    mocks.fetch.mockImplementation(() =>
+    { prompt: "继续执行任务", text: checkpoint, finish: "stop" },
+    { prompt: "读取交接文件并汇总", text: checkpoint.slice(0, -10), finish: "length" },
+    { prompt: "解释工具协议", text: "<｜｜DSML｜｜ calls>", finish: "stop" },
+    { prompt: "查看协议前缀", text: "<｜DSML", finish: "stop" },
+    { prompt: "解释这段XML", text: "```xml\n<think>literal example</think>\n```", finish: "stop" },
+  ])("does not reinterpret streamed body content or regenerate it: $prompt", async ({ prompt, text, finish }) => {
+    mocks.fetch.mockResolvedValue(
       responseWithSse(
-        ...Array.from("<think>Choose a title.</think>\n<｜｜DSML｜｜ calls>", (content) =>
-          envelope({ choices: [{ delta: { content } }] }),
-        ),
+        ...Array.from(text, (content) => envelope({ choices: [{ delta: { content } }] })),
+        envelope({ choices: [{ finish_reason: finish }] }),
         "[DONE]",
       ),
     );
-    const stream = streamQoder(model, agentContext, options);
+    const stream = streamQoder(
+      model,
+      {
+        ...agentContext,
+        systemPrompt: "Follow the user.",
+        messages: [{ role: "user", content: prompt }],
+      } as unknown as Context,
+      options,
+    );
     const events = [];
     for await (const event of stream) events.push(event);
     const result = await stream.result();
-
-    expect(result.stopReason).toBe("error");
-    expect(result.errorMessage).toContain("QODER_UNPARSED_TOOL_CALL");
-    expect(events.some((event) => event.type === "toolcall_start" || event.type === "done")).toBe(false);
+    expect(result.stopReason).toBe(finish);
+    expect(result.content).toEqual([{ type: "text", text }]);
     expect(
       events
         .filter((event) => event.type === "text_delta")
         .map((event) => event.delta)
-        .join("")
-        .trim(),
-    ).toBe("");
-    expect(JSON.stringify(result.content)).not.toContain("DSML");
+        .join(""),
+    ).toBe(text);
+    expect(events.some((event) => event.type === "toolcall_start" || event.type === "error")).toBe(false);
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+    expect(requestBody().messages).toEqual([
+      { role: "system", content: "Follow the user." },
+      { role: "user", content: prompt },
+    ]);
+  });
+
+  it.each([
+    { delta: { reasoning_content: "Only reasoning" }, expected: [{ type: "thinking", thinking: "Only reasoning" }] },
+    { delta: {}, expected: [] },
+  ])("preserves upstream termination without judging answer completeness: %j", async ({ delta, expected }) => {
+    mocks.fetch.mockResolvedValue(responseWithSse(envelope({ choices: [{ delta, finish_reason: "stop" }] }), "[DONE]"));
+    const result = await streamQoder(model, agentContext, options).result();
+    expect(result.stopReason).toBe("stop");
+    expect(result.content).toEqual(expected);
+    expect(result.errorMessage).toBeUndefined();
     expect(mocks.fetch).toHaveBeenCalledTimes(1);
   });
 
@@ -325,87 +328,6 @@ describe("streamQoder SSE handling", () => {
     const result = await streamQoder(model, context, options).result();
     expect(result.stopReason).toBe("stop");
     expect(result.content).toEqual([{ type: "text", text }]);
-  });
-
-  it("quarantines an unsolicited checkpoint and retries the original request once in a fresh session", async () => {
-    mocks.fetch
-      .mockResolvedValueOnce(textResponse(checkpoint))
-      .mockResolvedValueOnce(textResponse("Use the first skill."));
-    const stream = streamQoder(model, agentContext, { ...options, sessionId: "chat-a" });
-    const events = [];
-    for await (const event of stream) events.push(event);
-    const result = await stream.result();
-
-    expect(result.stopReason).toBe("stop");
-    expect(result.content).toEqual([{ type: "text", text: "Use the first skill." }]);
-    expect(events.filter((e) => e.type === "start")).toHaveLength(1);
-    expect(events.filter((e) => e.type === "done")).toHaveLength(1);
-    expect(JSON.stringify(events)).not.toContain("Review the conversation");
-    expect(mocks.fetch).toHaveBeenCalledTimes(2);
-    const [first, retry] = mocks.fetch.mock.calls.map((call) => JSON.parse(call[1].body.toString("utf8")));
-    expect(retry.messages.slice(1)).toEqual(first.messages);
-    expect(retry.tools).toEqual(first.tools);
-    expect(retry.messages[0]).toMatchObject({
-      role: "system",
-      content: expect.stringContaining("not a context-compaction request"),
-    });
-    expect(retry.session_id).not.toBe(first.session_id);
-    expect(retry.chat_record_id).not.toBe(first.chat_record_id);
-  });
-
-  it("does not leak the checkpoint in text deltas even when every character is a separate SSE delta", async () => {
-    mocks.fetch
-      .mockResolvedValueOnce(
-        responseWithSse(
-          ...Array.from(checkpoint, (content) => envelope({ choices: [{ delta: { content } }] })),
-          "[DONE]",
-        ),
-      )
-      .mockResolvedValueOnce(textResponse("fixed"));
-    const events = [];
-    for await (const event of streamQoder(model, agentContext, options)) events.push(event);
-    expect(
-      events
-        .filter((e) => e.type === "text_delta")
-        .map((e) => e.delta)
-        .join(""),
-    ).toBe("fixed");
-    expect(mocks.fetch).toHaveBeenCalledTimes(2);
-  });
-
-  it("fails explicitly after a second unsolicited checkpoint, without a retry loop or fake overflow", async () => {
-    mocks.fetch.mockImplementation(() => textResponse(checkpoint));
-    const result = await streamQoder(model, agentContext, options).result();
-    expect(mocks.fetch).toHaveBeenCalledTimes(2);
-    expect(result.stopReason).toBe("error");
-    expect(result.errorMessage).toContain("QODER_UNEXPECTED_SUMMARY");
-    expect(result.errorMessage).not.toContain("context_length_exceeded");
-    expect(result.content).toEqual([]);
-  });
-
-  it("recognizes the Chinese checkpoint headings from the incident", async () => {
-    const chinese =
-      "<analysis>会话梳理</analysis><summary>1. 主要请求与意图：排查\n2. 关键技术概念：技能\n3. 文件与代码段：文件\n4. 待办任务：回答</summary>";
-    mocks.fetch.mockResolvedValueOnce(textResponse(chinese)).mockResolvedValueOnce(textResponse("正常答复"));
-    const result = await streamQoder(model, agentContext, options).result();
-    expect(result.content).toEqual([{ type: "text", text: "正常答复" }]);
-    expect(mocks.fetch).toHaveBeenCalledTimes(2);
-  });
-
-  it.each([
-    "Summarize our conversation",
-    "请总结这次排查",
-    "输出 <summary> 格式",
-  ])("preserves explicitly requested summaries: %s", async (content) => {
-    mocks.fetch.mockResolvedValue(textResponse(checkpoint));
-    const result = await streamQoder(
-      model,
-      { ...agentContext, messages: [{ role: "user", content }] } as unknown as Context,
-      options,
-    ).result();
-    expect(result.stopReason).toBe("stop");
-    expect(result.content).toEqual([{ type: "text", text: checkpoint }]);
-    expect(mocks.fetch).toHaveBeenCalledTimes(1);
   });
 
   it("leaves tool-free host compaction requests alone", async () => {
@@ -424,18 +346,6 @@ describe("streamQoder SSE handling", () => {
     const result = await streamQoder(model, agentContext, options).result();
     expect(result.content).toEqual([{ type: "text", text }]);
     expect(mocks.fetch).toHaveBeenCalledTimes(1);
-  });
-
-  it("does not retry a quarantined response after cancellation", async () => {
-    const controller = new AbortController();
-    mocks.fetch.mockImplementation(() => {
-      controller.abort();
-      return textResponse(checkpoint);
-    });
-    const result = await streamQoder(model, agentContext, { ...options, signal: controller.signal }).result();
-    expect(result.stopReason).toBe("aborted");
-    expect(mocks.fetch).toHaveBeenCalledTimes(1);
-    expect(result.content).toEqual([]);
   });
 
   it("isolates remote conversations while retaining affinity inside one host session", async () => {
@@ -538,106 +448,6 @@ describe("streamQoder SSE handling", () => {
     );
     const result = await streamQoder(model, context, options).result();
     expect(result.stopReason).toBe("stop");
-  });
-
-  it("retries a truncated checkpoint without leaking its partial summary", async () => {
-    mocks.fetch
-      .mockResolvedValueOnce(
-        responseWithSse(
-          envelope({
-            choices: [{ delta: { content: checkpoint.replace("</summary>", "") }, finish_reason: "length" }],
-          }),
-          "[DONE]",
-        ),
-      )
-      .mockResolvedValueOnce(textResponse("normal answer"));
-    const result = await streamQoder(model, agentContext, options).result();
-    expect(result.content).toEqual([{ type: "text", text: "normal answer" }]);
-    expect(mocks.fetch).toHaveBeenCalledTimes(2);
-  });
-
-  it("does not retry rate limits, and emits only one error after a failed recovery request", async () => {
-    mocks.fetch
-      .mockResolvedValueOnce(textResponse(checkpoint))
-      .mockResolvedValueOnce(responseWithSse(envelope("rate limited", 429)));
-    const events = [];
-    const stream = streamQoder(model, agentContext, options);
-    for await (const event of stream) events.push(event);
-    const result = await stream.result();
-    expect(mocks.fetch).toHaveBeenCalledTimes(2);
-    expect(result.stopReason).toBe("error");
-    expect(result.errorMessage).toContain("429");
-    expect(events.filter((e) => e.type === "error")).toHaveLength(1);
-    expect(events.filter((e) => e.type === "done")).toHaveLength(0);
-    expect(JSON.stringify(events)).not.toContain("Review the conversation");
-  });
-
-  it.each([
-    checkpoint,
-    "<thinking>Let me run the next check.",
-  ])("recovery preserves prior tool results and returns a new tool call only once: %s", async (incomplete) => {
-    mocks.fetch.mockResolvedValueOnce(textResponse(incomplete)).mockResolvedValueOnce(
-      responseWithSse(
-        envelope({
-          choices: [
-            {
-              delta: {
-                tool_calls: [{ index: 0, id: "new_call", function: { name: "bash", arguments: '{"command":"pwd"}' } }],
-              },
-              finish_reason: "tool_calls",
-            },
-          ],
-        }),
-        "[DONE]",
-      ),
-    );
-    const history = {
-      ...agentContext,
-      messages: [
-        ...context.messages,
-        {
-          role: "assistant",
-          content: [{ type: "toolCall", id: "old_call", name: "bash", arguments: { command: "ls" } }],
-          stopReason: "toolUse",
-        },
-        {
-          role: "toolResult",
-          toolCallId: "old_call",
-          toolName: "bash",
-          content: [{ type: "text", text: "already executed" }],
-          isError: false,
-        },
-      ],
-    } as unknown as Context;
-    const stream = streamQoder(model, history, options);
-    const events = [];
-    for await (const event of stream) events.push(event);
-    expect(events.filter((e) => e.type === "toolcall_end")).toHaveLength(1);
-    expect((await stream.result()).stopReason).toBe("toolUse");
-    const bodies = mocks.fetch.mock.calls.map((call) => JSON.parse(call[1].body.toString("utf8")));
-    expect(bodies[1].messages.slice(1)).toEqual(bodies[0].messages);
-    expect(bodies[1].messages.at(-1)).toMatchObject({
-      role: "tool",
-      tool_call_id: "old_call",
-      content: "already executed",
-    });
-  });
-
-  it("does not leak native thinking or partial snapshots from a rejected attempt", async () => {
-    mocks.fetch
-      .mockResolvedValueOnce(
-        responseWithSse(
-          envelope({ choices: [{ delta: { reasoning_content: "discarded attempt reasoning" } }] }),
-          envelope({ choices: [{ delta: { content: checkpoint } }] }),
-          "[DONE]",
-        ),
-      )
-      .mockResolvedValueOnce(textResponse("normal answer"));
-    const events = [];
-    for await (const event of streamQoder(model, agentContext, { ...options, reasoning: "high" })) events.push(event);
-    expect(JSON.stringify(events)).not.toContain("discarded attempt");
-    expect(JSON.stringify(events)).not.toContain("Review the conversation");
-    expect(events.filter((e) => e.type === "start")).toHaveLength(1);
   });
 
   it("invokes host request/response/event inspection hooks without enabling provider logging", async () => {
@@ -803,82 +613,7 @@ describe("streamQoder SSE handling", () => {
     expect(result.errorMessage).toBe("Qoder SSE response body is not valid JSON");
   });
 
-  it("rejects a successful stream that contains no assistant content", async () => {
-    mocks.fetch.mockResolvedValue(responseWithSse("[DONE]"));
-
-    const result = await streamQoder(model, context, options).result();
-
-    expect(result.stopReason).toBe("error");
-    expect(result.errorMessage).toBe("Qoder upstream completed without assistant content");
-  });
-
-  it.each([
-    { reasoning_content: "Let me simulate the current parsing behavior. Let's run." },
-    { content: "<thinking>Let me run the next check.</thinking> \n" },
-    { content: "<thinking>Let me run the next check." },
-  ])("recovers thinking-only generation once without exposing the discarded attempt: %j", async (delta) => {
-    mocks.fetch
-      .mockResolvedValueOnce(responseWithSse(envelope({ choices: [{ delta, finish_reason: "stop" }] }), "[DONE]"))
-      .mockResolvedValueOnce(textResponse("已完成核查，文件名不会命中原关键词。"));
-    const stream = streamQoder(model, agentContext, { ...options, sessionId: "chat-a" });
-    const events = [];
-    for await (const event of stream) events.push(event);
-    const result = await stream.result();
-
-    expect(result.stopReason).toBe("stop");
-    expect(result.content).toEqual([{ type: "text", text: "已完成核查，文件名不会命中原关键词。" }]);
-    expect(events.filter((event) => event.type === "start")).toHaveLength(1);
-    expect(events.filter((event) => event.type === "done")).toHaveLength(1);
-    expect(events.some((event) => event.type === "error" || event.type === "thinking_delta")).toBe(false);
-    expect(JSON.stringify(events)).not.toContain("Let me");
-    expect(mocks.fetch).toHaveBeenCalledTimes(2);
-    const [first, retry] = mocks.fetch.mock.calls.map((call) => JSON.parse(call[1].body.toString("utf8")));
-    expect(retry.messages.slice(1)).toEqual(first.messages);
-    expect(retry.tools).toEqual(first.tools);
-    expect(retry.messages[0]).toMatchObject({
-      role: "system",
-      content: expect.stringContaining("Return a user-facing answer or a real tool call"),
-    });
-    expect(retry.session_id).not.toBe(first.session_id);
-    expect(retry.chat_record_id).not.toBe(first.chat_record_id);
-  });
-
-  it.each([
-    ["<thinking>Only a plan.", checkpoint],
-    [checkpoint, "<thinking>Only a plan."],
-  ])("shares a single recovery limit across incomplete output and checkpoints: %j", async (first, second) => {
-    mocks.fetch.mockResolvedValueOnce(textResponse(first)).mockResolvedValueOnce(textResponse(second));
-    const stream = streamQoder(model, agentContext, options);
-    const events = [];
-    for await (const event of stream) events.push(event);
-    const result = await stream.result();
-    expect(mocks.fetch).toHaveBeenCalledTimes(2);
-    expect(result.stopReason).toBe("error");
-    expect(events.filter((event) => event.type === "error")).toHaveLength(1);
-    expect(events.some((event) => event.type === "done" || event.type === "toolcall_start")).toBe(false);
-    if (second === checkpoint) {
-      expect(result.errorMessage).toContain("QODER_UNEXPECTED_SUMMARY");
-      expect(result.content).toEqual([]);
-    } else {
-      expect(result.errorMessage).toContain("QODER_INCOMPLETE_RESPONSE");
-      expect(result.errorMessage).toContain("no further retry");
-      expect(result.content).toEqual([{ type: "thinking", thinking: "Only a plan." }]);
-    }
-  });
-
-  it("does not retry incomplete output after public text has already streamed", async () => {
-    mocks.fetch.mockResolvedValue(textResponse("已找到文件。<thinking>Let me check."));
-    const result = await streamQoder(model, agentContext, options).result();
-    expect(result.stopReason).toBe("error");
-    expect(result.errorMessage).toContain("QODER_INCOMPLETE_RESPONSE");
-    expect(result.content).toEqual([
-      { type: "text", text: "已找到文件。" },
-      { type: "thinking", thinking: "Let me check." },
-    ]);
-    expect(mocks.fetch).toHaveBeenCalledTimes(1);
-  });
-
-  it("does not retry a thinking-only attempt cancelled before recovery", async () => {
+  it("does not retry a cancelled thinking-only response", async () => {
     const controller = new AbortController();
     mocks.fetch.mockResolvedValue(textResponse("<thinking>Let me check."));
     const result = await streamQoder(model, agentContext, {
@@ -890,67 +625,15 @@ describe("streamQoder SSE handling", () => {
     expect(mocks.fetch).toHaveBeenCalledTimes(1);
   });
 
-  it("surfaces an upstream failure during incomplete-output recovery without another retry", async () => {
-    mocks.fetch
-      .mockResolvedValueOnce(textResponse("<thinking>Let me check."))
-      .mockResolvedValueOnce(responseWithSse(envelope("rate limited", 429)));
-    const result = await streamQoder(model, agentContext, options).result();
-    expect(result.stopReason).toBe("error");
-    expect(result.errorMessage).toContain("429");
-    expect(result.content).toEqual([]);
-    expect(mocks.fetch).toHaveBeenCalledTimes(2);
-  });
-
-  it.each([
-    false,
-    "off",
-    "high",
-  ])("rejects repeated fragmented unclosed thinking with reasoning=%s without inventing tools", async (reasoning) => {
-    const chunks = ["<", "thinking", ">", "Confirmed", " live", ".</", "｜｜DSML｜｜", " parameter", ">"];
-    mocks.fetch.mockImplementation(() =>
-      responseWithSse(
-        ...chunks.map((content) => envelope({ choices: [{ delta: { content } }] })),
-        envelope({ choices: [{ finish_reason: "stop" }] }),
-        "[DONE]",
-      ),
-    );
-    const stream = streamQoder(model, agentContext, { ...options, reasoning } as SimpleStreamOptions);
-    const events = [];
-    for await (const event of stream) events.push(event);
-    const result = await stream.result();
-
-    expect(result.stopReason).toBe("error");
-    expect(result.errorMessage).toContain("QODER_INCOMPLETE_RESPONSE");
-    expect(result.content).toEqual([{ type: "thinking", thinking: chunks.join("").slice("<thinking>".length) }]);
-    expect(events.some((event) => event.type === "text_delta" || event.type === "toolcall_start")).toBe(false);
-    expect(events.filter((event) => event.type === "thinking_end")).toHaveLength(1);
-    expect(events.filter((event) => event.type === "error")).toHaveLength(1);
-    expect(events.some((event) => event.type === "done")).toBe(false);
-    expect(mocks.fetch).toHaveBeenCalledTimes(2);
-  });
-
-  it.each([
-    { delta: { content: "<think>reason</think>" }, finish_reason: "stop" },
-    { delta: { content: "<reasoning>reason</reasoning> \n" }, finish_reason: undefined },
-    { delta: { reasoning_content: "native reasoning" }, finish_reason: "stop" },
-    { delta: { content: "prefix<thought>unfinished" }, finish_reason: "stop" },
-    { delta: { content: "<thinking>" }, finish_reason: "stop" },
-    { delta: { content: "<thinking></thinking>" }, finish_reason: "stop" },
-  ])("rejects incomplete output without a usable answer: %j", async (choice) => {
-    mocks.fetch.mockImplementation(() => responseWithSse(envelope({ choices: [choice] }), "[DONE]"));
-    const result = await streamQoder(model, agentContext, options).result();
-    expect(result.stopReason).toBe("error");
-    expect(result.errorMessage).toContain("QODER_INCOMPLETE_RESPONSE");
-    expect(mocks.fetch).toHaveBeenCalledTimes(choice.delta.content?.startsWith("prefix") ? 1 : 2);
-  });
-
-  it("preserves native reasoning, tagged reasoning and the complete answer with paired end events", async () => {
+  it("keeps native reasoning separate from literal tags across channel transitions", async () => {
     mocks.fetch.mockResolvedValue(
       responseWithSse(
-        envelope({ choices: [{ delta: { reasoning_content: "native reasoning" } }] }),
-        ...Array.from("prefix<think>tagged reasoning</think>\n\nanswer", (content) =>
+        envelope({ choices: [{ delta: { reasoning_content: "first reasoning" } }] }),
+        ...Array.from("```xml\n<think>example</think>\n```", (content) =>
           envelope({ choices: [{ delta: { content } }] }),
         ),
+        envelope({ choices: [{ delta: { reasoning_content: "second reasoning" } }] }),
+        envelope({ choices: [{ delta: { content: "final answer" }, finish_reason: "stop" }] }),
         "[DONE]",
       ),
     );
@@ -958,12 +641,11 @@ describe("streamQoder SSE handling", () => {
     const events = [];
     for await (const event of stream) events.push(event);
     const result = await stream.result();
-    expect(result.stopReason).toBe("stop");
     expect(result.content).toEqual([
-      { type: "thinking", thinking: "native reasoning" },
-      { type: "text", text: "prefix" },
-      { type: "thinking", thinking: "tagged reasoning" },
-      { type: "text", text: "\n\nanswer" },
+      { type: "thinking", thinking: "first reasoning" },
+      { type: "text", text: "```xml\n<think>example</think>\n```" },
+      { type: "thinking", thinking: "second reasoning" },
+      { type: "text", text: "final answer" },
     ]);
     for (const [index, block] of result.content.entries()) {
       expect(
@@ -1009,20 +691,6 @@ describe("streamQoder SSE handling", () => {
     expect(mocks.fetch).toHaveBeenCalledTimes(1);
   });
 
-  it.each([
-    "<thinking>unfinished",
-    "<think>reason</think>",
-    "<thinking>",
-  ])("keeps length termination for thinking output: %s", async (content) => {
-    mocks.fetch.mockResolvedValue(
-      responseWithSse(envelope({ choices: [{ delta: { content }, finish_reason: "length" }] }), "[DONE]"),
-    );
-    const result = await streamQoder(model, context, options).result();
-    expect(result.stopReason).toBe("length");
-    expect(result.errorMessage).toBeUndefined();
-    expect(result.content.every((block) => block.type === "thinking")).toBe(true);
-  });
-
   it("keeps abort precedence over incomplete thinking", async () => {
     const controller = new AbortController();
     mocks.fetch.mockResolvedValue(textResponse("<thinking>unfinished"));
@@ -1032,21 +700,19 @@ describe("streamQoder SSE handling", () => {
       onProviderStreamEvent: () => controller.abort(),
     } as SimpleStreamOptions).result();
     expect(result.stopReason).toBe("aborted");
-    expect(result.errorMessage).not.toContain("QODER_INCOMPLETE_RESPONSE");
     expect(mocks.fetch).toHaveBeenCalledTimes(1);
   });
 
   it("keeps an upstream failure rather than replacing it with an incomplete-output error", async () => {
     mocks.fetch.mockResolvedValue(
       responseWithSse(
-        envelope({ choices: [{ delta: { content: "<think>unfinished" } }] }),
+        envelope({ choices: [{ delta: { reasoning_content: "unfinished" } }] }),
         envelope("unavailable", 503),
       ),
     );
     const result = await streamQoder(model, agentContext, options).result();
     expect(result.stopReason).toBe("error");
     expect(result.errorMessage).toContain("503");
-    expect(result.errorMessage).not.toContain("QODER_INCOMPLETE_RESPONSE");
     expect(result.content).toEqual([{ type: "thinking", thinking: "unfinished" }]);
     expect(mocks.fetch).toHaveBeenCalledTimes(1);
   });
@@ -1131,5 +797,110 @@ describe("streamQoder SSE handling", () => {
 
     expect(result.stopReason).toBe("error");
     expect(result.errorMessage).toBe("Qoder tool call arguments are not valid JSON (write_file)");
+  });
+
+  it.each([
+    { id: "", name: "read", arguments: "{}" },
+    { id: "call_2", name: " ", arguments: "{}" },
+    { id: "call_2", name: "read", arguments: "[]" },
+    { id: "call_2", name: "read", arguments: "null" },
+  ])("does not finalize any tools when a sibling tool is invalid: %j", async (invalid) => {
+    mocks.fetch.mockResolvedValue(
+      responseWithSse(
+        envelope({
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  { index: 0, id: "call_1", function: { name: "read", arguments: "{}" } },
+                  { index: 1, id: invalid.id, function: { name: invalid.name, arguments: invalid.arguments } },
+                ],
+              },
+              finish_reason: "tool_calls",
+            },
+          ],
+        }),
+        "[DONE]",
+      ),
+    );
+    const stream = streamQoder(model, context, options);
+    const events = [];
+    for await (const event of stream) events.push(event);
+    expect((await stream.result()).stopReason).toBe("error");
+    expect(events.some((event) => event.type === "toolcall_end" || event.type === "done")).toBe(false);
+  });
+
+  it("honors zero temperature and ordinary headers including case-insensitive removal", async () => {
+    mockTextResponse();
+    const result = await streamQoder(model, context, {
+      ...options,
+      temperature: 0,
+      headers: { "X-Trace": "trace-1", ACCEPT: "text/event-stream", "accept-encoding": null },
+    }).result();
+    expect(result.stopReason).toBe("stop");
+    expect(requestBody().parameters.temperature).toBe(0);
+    const headers = new Headers(mocks.fetch.mock.calls[0][1].headers);
+    expect(headers.get("x-trace")).toBe("trace-1");
+    expect(headers.has("accept-encoding")).toBe(false);
+    expect(headers.get("content-type")).toBe("application/json");
+  });
+
+  it.each([
+    "AUTHORIZATION",
+    "cosy-key",
+    "Host",
+    "Content-Length",
+    "X-Model-Key",
+  ])("rejects overriding or suppressing managed header %s before sending", async (name) => {
+    for (const value of ["override", null]) {
+      const result = await streamQoder(model, context, { ...options, headers: { [name]: value } }).result();
+      expect(result.stopReason).toBe("error");
+      expect(result.errorMessage).toContain("Qoder-managed header");
+      expect(mocks.fetch).not.toHaveBeenCalled();
+    }
+  });
+
+  it.each([
+    { reasoning: undefined, enabled: false, effort: "none" },
+    { reasoning: false, enabled: false, effort: "none" },
+    { reasoning: "off", enabled: false, effort: "none" },
+    { reasoning: "high", enabled: true, effort: "high" },
+  ])("maps host thinking mode to the supported wire flags: %j", async ({ reasoning, enabled, effort }) => {
+    const catalog = Object.freeze({
+      key: model.id,
+      is_reasoning: true,
+      thinking_config: {
+        disabled: { is_default: false },
+        enabled: { is_default: true, efforts: { high: { is_default: true } } },
+      },
+    });
+    mocks.getCachedModelConfig.mockReturnValue(catalog);
+    mockTextResponse();
+    // Older hosts also pass boolean/off values outside the current SDK's effort union.
+    const hostOptions = { ...options, reasoning } as unknown as SimpleStreamOptions;
+    const result = await streamQoder(model, context, hostOptions).result();
+    expect(result.stopReason).toBe("stop");
+    expect(requestBody().parameters).toMatchObject({ enable_thinking: enabled, reasoning_effort: effort });
+    expect(requestBody().model_config.is_reasoning).toBe(enabled);
+    expect(catalog.thinking_config.disabled.is_default).toBe(false);
+  });
+
+  it("does not alias requests with different temperature or thinking mode in one session", async () => {
+    mocks.getCachedModelConfig.mockReturnValue({
+      key: model.id,
+      is_reasoning: true,
+      thinking_config: { disabled: {}, enabled: { efforts: { high: {} } } },
+    });
+    mocks.fetch.mockImplementation(() => textResponse("pong"));
+    for (const settings of [
+      { temperature: 0 },
+      { temperature: 0.5 },
+      { temperature: 0.5, reasoning: "high" as const },
+    ]) {
+      await streamQoder(model, context, { ...options, ...settings, sessionId: "same-session" }).result();
+    }
+    const bodies = mocks.fetch.mock.calls.map((call) => JSON.parse(call[1].body.toString()));
+    expect(new Set(bodies.map((body) => body.chat_record_id)).size).toBe(3);
+    expect(new Set(bodies.map((body) => body.session_id)).size).toBe(1);
   });
 });

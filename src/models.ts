@@ -341,20 +341,6 @@ export function deriveQoderThinkingLevelMap(
   return map;
 }
 
-/**
- * Extract a concrete thinking-effort label from the host `reasoning` option.
- * Booleans / `off` are not effort levels — they only toggle thinking.
- */
-export function resolveRequestedThinkingEffort(reasoning: unknown): string | undefined {
-  if (typeof reasoning !== "string") return undefined;
-  if (reasoning === "off" || reasoning === "true" || reasoning === "false") return undefined;
-  return reasoning.length > 0 ? reasoning : undefined;
-}
-
-export function qoderSupportsThinkingEffort(entry: QoderModelEntry, effort: string): boolean {
-  return !!entry.thinking_config?.enabled?.efforts?.[effort];
-}
-
 /** Model identity, mirroring the host catalog's class/family classification. */
 export interface QoderModelIdentity {
   class: string;
@@ -383,33 +369,65 @@ export function qoderModelIdentity(id: string): QoderModelIdentity {
 }
 
 /**
- * Apply a host-selected thinking effort onto the upstream model_config.
- * If the model does not advertise that effort, leave the entry unchanged so
- * the request keeps the catalog default instead of inventing levels or crashing.
+ * Select only catalog-advertised thinking modes/efforts without mutating it.
+ * Unsupported effort labels retain the catalog default after host clamping.
+ * Explicit toggles fail when unavailable instead of silently keeping a default.
  */
-export function withQoderThinkingEffort(entry: QoderModelEntry, effort: string): QoderModelEntry {
-  const configuredEfforts = entry.thinking_config?.enabled?.efforts;
-  if (!configuredEfforts?.[effort]) {
-    return entry;
+export function applyQoderThinkingOptions(
+  entry: QoderModelEntry,
+  reasoning: unknown,
+): { modelConfig: QoderModelEntry; effort?: string } {
+  const thinkingConfig = entry.thinking_config;
+  const configuredEfforts = thinkingConfig?.enabled?.efforts;
+  const effort =
+    typeof reasoning === "string" &&
+    reasoning !== "off" &&
+    reasoning !== "true" &&
+    reasoning !== "false" &&
+    configuredEfforts &&
+    reasoning.length > 0 &&
+    Object.hasOwn(configuredEfforts, reasoning)
+      ? reasoning
+      : undefined;
+  const enabled = reasoning === true || effort !== undefined;
+  const disabled = reasoning === false || reasoning === "off";
+  if (!enabled && !disabled) return { modelConfig: entry };
+
+  const mode = enabled ? "enabled" : "disabled";
+  if (!thinkingConfig?.[mode]) {
+    throw new Error(
+      `Qoder model "${entry.display_name || entry.key || "unknown"}" does not support ${enabled ? "enabling" : "disabling"} thinking.`,
+    );
   }
-  const efforts = Object.fromEntries(
-    Object.entries(configuredEfforts).map(([name, config]) => [name, { ...config, is_default: name === effort }]),
-  );
+
   return {
-    ...entry,
-    is_reasoning: true,
-    thinking_config: {
-      ...entry.thinking_config,
-      disabled: {
-        ...entry.thinking_config?.disabled,
-        is_default: false,
-      },
-      enabled: {
-        ...entry.thinking_config?.enabled,
-        is_default: true,
-        efforts,
+    modelConfig: {
+      ...entry,
+      is_reasoning: enabled,
+      thinking_config: {
+        ...thinkingConfig,
+        ...(thinkingConfig.disabled ? { disabled: { ...thinkingConfig.disabled, is_default: disabled } } : {}),
+        ...(thinkingConfig.enabled
+          ? {
+              enabled: {
+                ...thinkingConfig.enabled,
+                is_default: enabled,
+                ...(effort && configuredEfforts
+                  ? {
+                      efforts: Object.fromEntries(
+                        Object.entries(configuredEfforts).map(([name, config]) => [
+                          name,
+                          { ...config, is_default: name === effort },
+                        ]),
+                      ),
+                    }
+                  : {}),
+              },
+            }
+          : {}),
       },
     },
+    ...(effort ? { effort } : {}),
   };
 }
 

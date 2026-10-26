@@ -177,7 +177,7 @@ describe("transformMessagesForQoder", () => {
     });
   });
 
-  it("handles assistant message with thinking block", () => {
+  it("keeps assistant thinking separate from response text", () => {
     const msgs = [
       {
         role: "assistant",
@@ -187,25 +187,141 @@ describe("transformMessagesForQoder", () => {
         ],
       },
     ] as unknown as Message[];
-    const result = transformMessagesForQoder(msgs);
-    expect(result[0].content).toContain("<thinking>let me think</thinking>");
-    expect(result[0].content).toContain("answer");
+    expect(transformMessagesForQoder(msgs)).toEqual([
+      {
+        role: "assistant",
+        content: "answer",
+        reasoning_content: "let me think",
+      },
+    ]);
   });
 
-  it("handles toolResult messages", () => {
+  it("preserves interleaved thinking, text, and tool calls without adding delimiters", () => {
     const msgs = [
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: " First <thinking>" },
+          { type: "text", text: "answer " },
+          { type: "toolCall", id: "call_1", name: "read_file", arguments: { path: "/tmp/test" } },
+          { type: "thinking", thinking: "\nsecond</thinking> " },
+          { type: "text", text: "continues" },
+        ],
+      },
+    ] as unknown as Message[];
+    expect(transformMessagesForQoder(msgs)).toEqual([
+      {
+        role: "assistant",
+        content: "answer continues",
+        reasoning_content: " First <thinking>\nsecond</thinking> ",
+        tool_calls: [
+          {
+            id: "call_1",
+            type: "function",
+            function: { name: "read_file", arguments: JSON.stringify({ path: "/tmp/test" }) },
+          },
+        ],
+      },
+    ]);
+  });
+
+  it.each(["", " \n<host>raw & reasoning</host>\n "])("preserves thinking-only content verbatim (%j)", (thinking) => {
+    const msgs = [
+      {
+        role: "assistant",
+        content: [{ type: "thinking", thinking }],
+      },
+    ] as unknown as Message[];
+    expect(transformMessagesForQoder(msgs)).toEqual([
+      {
+        role: "assistant",
+        content: "",
+        reasoning_content: thinking,
+      },
+    ]);
+  });
+
+  it("preserves text-only tool results", () => {
+    const msgs: Message[] = [
       {
         role: "toolResult",
         toolCallId: "call_1",
+        toolName: "read_file",
+        content: [
+          { type: "text", text: "file content " },
+          { type: "text", text: "here" },
+        ],
+        isError: false,
+        timestamp: 0,
+      },
+    ];
+    expect(transformMessagesForQoder(msgs)).toEqual([
+      {
+        role: "tool",
+        tool_call_id: "call_1",
         content: "file content here",
       },
-    ] as unknown as Message[];
-    const result = transformMessagesForQoder(msgs);
-    expect(result[0]).toEqual({
-      role: "tool",
-      tool_call_id: "call_1",
-      content: "file content here",
-    });
+    ]);
+  });
+
+  it("preserves mixed tool result blocks in their original order", () => {
+    const msgs: Message[] = [
+      {
+        role: "toolResult",
+        toolCallId: "call_1",
+        toolName: "read_file",
+        content: [
+          { type: "text", text: "before" },
+          { type: "image", data: "first", mimeType: "image/png" },
+          { type: "text", text: "" },
+          { type: "text", text: "between" },
+          { type: "image", data: "second", mimeType: "image/jpeg" },
+          { type: "text", text: "after" },
+        ],
+        isError: false,
+        timestamp: 0,
+      },
+    ];
+    expect(transformMessagesForQoder(msgs)).toEqual([
+      {
+        role: "tool",
+        tool_call_id: "call_1",
+        content: [
+          { type: "text", text: "before" },
+          { type: "image_url", image_url: { url: "data:image/png;base64,first" } },
+          { type: "text", text: "" },
+          { type: "text", text: "between" },
+          { type: "image_url", image_url: { url: "data:image/jpeg;base64,second" } },
+          { type: "text", text: "after" },
+        ],
+      },
+    ]);
+  });
+
+  it("preserves image-only tool results", () => {
+    const msgs: Message[] = [
+      {
+        role: "toolResult",
+        toolCallId: "call_1",
+        toolName: "read_file",
+        content: [
+          { type: "image", data: "first", mimeType: "image/png" },
+          { type: "image", data: "second", mimeType: "image/jpeg" },
+        ],
+        isError: false,
+        timestamp: 0,
+      },
+    ];
+    expect(transformMessagesForQoder(msgs)).toEqual([
+      {
+        role: "tool",
+        tool_call_id: "call_1",
+        content: [
+          { type: "image_url", image_url: { url: "data:image/png;base64,first" } },
+          { type: "image_url", image_url: { url: "data:image/jpeg;base64,second" } },
+        ],
+      },
+    ]);
   });
 
   it("handles assistant message with string content", () => {

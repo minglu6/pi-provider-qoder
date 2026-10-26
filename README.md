@@ -51,7 +51,7 @@ Hard rules:
 - **WAF Bypass**: Built-in WAF obfuscation and body encoding (`Encode=1`).
 - **COSY Signing**: Full COSY signature header generation (RSA/AES-CBC/MD5).
 - **Dynamic Model Catalog**: Dynamically fetches model limits, effort configurations, and options from the `/algo/api/v2/model/list` endpoint.
-- **Reasoning/Thinking Support**: Real-time extraction of thinking process from API reasoning or HTML-like `<think>` tags.
+- **Reasoning/Thinking Support**: Maps the API's explicit `reasoning_content` field without interpreting tags in ordinary text.
 
 ## Quick Start
 
@@ -197,13 +197,14 @@ For safe request diagnostics, set `QODER_COSY_DEBUG=1`. Logs include the URL, st
 ## Stream safety and diagnostics
 
 - Remote session IDs are scoped to the host's `sessionId`, account, region and model, not shared across every chat. Calls without a host session ID get a fresh remote session. Tool-free summarization is separated from tool-enabled chat.
-- System instructions are sent as the first `messages` entry with `role: "system"`; the gateway does not apply a standalone top-level `system` field. Legacy host prompt strings/ordered arrays (OMP), transcript prompt updates (Pi), and recovery instructions all use this path. Prompt sections retain their order and are joined with blank lines.
+- Host system instructions are sent as the first `messages` entry with `role: "system"`; the gateway does not apply a standalone top-level `system` field. Legacy host prompt strings/ordered arrays (OMP) and transcript prompt updates (Pi) use this path. Prompt sections retain their order and are joined with blank lines. The provider adds no instructions of its own.
 - Token usage is read from upstream snapshots, including usage-only terminal chunks and cached prompt tokens. Missing usage is not fabricated. `length`, errors and disconnected streams are no longer reported as a successful `stop`.
-- Tagged reasoning is parsed across arbitrary stream boundaries even when reasoning is disabled. Text and thinking blocks retain arrival-order indexes, preserve whitespace, and receive paired end events. A normal stop with only reasoning, or unclosed tagged reasoning without a real tool call, is incomplete output, not a successful answer. Orphan DSML fragments are never guessed into executable tool calls.
-- A raw DSML token at the start of the public response, including after reasoning and across stream boundaries, fails with `QODER_UNPARSED_TOOL_CALL` instead of becoming a successful answer or generated title. Truncated DSML prefixes are rejected too. Only upstream structured `tool_calls` are accepted as tools; this error does not trigger provider retries. Explanations and fenced examples remain ordinary text. Hosts can handle the explicit failure through their own title-generation fallback.
-- For tool-enabled tasks that are not explicit summary requests, an incomplete response can recover **once**, before any ordinary text or tool call has streamed. The provider resends the original messages/tools in a fresh remote session with a completion instruction; it does not replay rejected reasoning or execute tools. Repeated incomplete output reports `QODER_INCOMPLETE_RESPONSE`, retains the final attempt's partial reasoning, and states that recovery was exhausted. Already streamed answers/tool calls, length limits, cancellation and upstream errors do not trigger this recovery.
-- The specific unsolicited `<analysis>…</analysis><summary>…</summary>` conversation-checkpoint scaffold (at least three recognized English/Chinese checkpoint headings) is also quarantined. It shares the **same single retry** with incomplete output; mixed failures cannot start another retry loop. A checkpoint after recovery reports `QODER_UNEXPECTED_SUMMARY`, not fake context overflow. Recovery may incur one additional model request.
-- These are narrow output safeguards, not proof of an upstream compaction bug or a general XML filter. Tool-free host compactions, explicit summary requests and ordinary XML examples are preserved. While the response prefix is undecided, reasoning/events are buffered; ordinary text or a tool call resumes streaming.
+- The provider is a protocol gateway, not an answer-quality judge. It does not classify user intent, filter summaries/checkpoints, inject corrective prompts, or regenerate answers. Upstream completion status is mapped independently of whether the response contains text, reasoning only, or no content; `stop` is a transport termination, not a claim that the user's task succeeded.
+- Only `reasoning_content` maps to thinking; `content` stays literal text, including XML/code examples and DSML. Channel transitions preserve order, whitespace and paired end events. Structured tool calls must have a nonblank ID/name and valid object arguments before any tool call is finalized.
+- User and tool-result images retain their ordered text/image parts. Historical assistant reasoning is sent in `reasoning_content`, never injected into the answer body. Tool images and reasoning history were verified with the Qoder CN enterprise gateway.
+- Thinking modes follow the live catalog. Supported off mode sends `enable_thinking: false`, `reasoning_effort: "none"` and matching model flags; supported efforts enable thinking. Pi's omitted reasoning option means off where the catalog supports it. Explicit unsupported toggles fail rather than silently changing modes. `temperature`, including zero, is forwarded without choosing a provider default.
+- Ordinary custom headers are merged case-insensitively; null removes a default header. Overrides/removal of authentication, COSY, routing and body-framing headers are rejected before sending. Request identities include generation parameters and model configuration so mode/temperature changes cannot alias a prior request.
+- Authentication expiry may trigger one credential refresh and request retry before any assistant content is received. This transport recovery never changes the conversation or retries based on answer content. Host inspection hooks may still modify payloads explicitly.
 - The provider honors host `onPayload`, `onResponse`, and (when available) `onProviderStreamEvent` inspection hooks. No prompt, response or credential logging is enabled automatically. Use opt-in inspection carefully; these hooks can expose sensitive conversation data.
 
 ## Endpoints
@@ -293,7 +294,6 @@ src/
 ├── stream.ts           # Main streaming response handler
 ├── transform.ts        # Message conversions (OpenAI schema mapping)
 ├── usage.ts            # Usage / quota tracking
-├── thinking-parser.ts  # Fallback <think> tag parser
 └── qoder-encoding.ts   # WAF bypass body encoder
 ```
 

@@ -5,6 +5,7 @@ import type {
   AssistantMessageEventStream,
   Model,
   SimpleStreamOptions,
+  TextContent,
   ThinkingContent,
   ToolCall,
 } from "@earendil-works/pi-ai";
@@ -22,18 +23,10 @@ import {
   logCosyRequest,
   logCosyResponse,
 } from "./cosy.js";
-import {
-  getCachedModelConfig,
-  type QoderModelEntry,
-  qoderSupportsThinkingEffort,
-  resolveRequestedThinkingEffort,
-  withQoderThinkingEffort,
-} from "./models.js";
+import { applyQoderThinkingOptions, getCachedModelConfig, type QoderModelEntry } from "./models.js";
 import { resolveQoderIdentity } from "./oauth.js";
 import { qoderEncodeBody } from "./qoder-encoding.js";
-import { type ResponseRecoveryReason, requestsSummary, withResponseRecovery } from "./response-guard.js";
 import { applyQoderUsage, type QoderTokenUsage, qoderStopReason } from "./stream-metadata.js";
-import { ThinkingTagParser } from "./thinking-parser.js";
 import { type QoderContext, resolveQoderContext, transformMessagesForQoder, transformTools } from "./transform.js";
 
 interface ToolCallState {
@@ -74,8 +67,11 @@ interface QoderSseBody {
 }
 
 function parseToolCallArguments(state: ToolCallState): Record<string, unknown> {
+  if (!state.id.trim() || !state.name.trim()) {
+    throw new Error("Qoder tool call is missing its id or function name");
+  }
+  const identity = state.name;
   if (!state.arguments.trim()) return {};
-  const identity = state.name || state.id || "unknown";
 
   let parsed: unknown;
   try {
@@ -104,7 +100,7 @@ function stableChatRecordID(
   model: string,
   messages: Array<{ role?: string; content?: unknown }>,
   tools: unknown,
-  maxTokens: number,
+  settings: unknown,
   sessionID: string,
   system: string,
 ): string {
@@ -117,7 +113,7 @@ function stableChatRecordID(
     system,
     JSON.stringify(messages),
     JSON.stringify(tools ?? []),
-    String(maxTokens),
+    JSON.stringify(settings),
   );
 }
 
@@ -128,22 +124,13 @@ export function streamQoder(
   renewAccess?: RenewQoderAccess,
 ): AssistantMessageEventStream {
   const auth = { renewAccess, retried: false, accessToken: options?.apiKey };
-  const attempt = (recovery?: ResponseRecoveryReason) =>
-    streamQoderAttempt(model, context, { ...options, apiKey: auth.accessToken }, recovery, auth);
-  const resolved = resolveQoderContext(context);
-  const lastUser = [...resolved.messages].reverse().find((message) => message.role === "user");
-  const lastUserText = lastUser ? transformMessagesForQoder([lastUser])[0]?.content : "";
-  const requestedText = typeof lastUserText === "string" ? lastUserText : JSON.stringify(lastUserText ?? "");
-  // Host compaction is tool-free. Explicit user summaries must remain valid.
-  if (resolved.tools.length === 0 || requestsSummary(requestedText)) return attempt();
-  return withResponseRecovery(attempt, options?.signal);
+  return streamQoderAttempt(model, context, options, auth);
 }
 
 function streamQoderAttempt(
   model: Model<Api>,
   context: QoderContext,
   options?: SimpleStreamOptions,
-  recovery?: ResponseRecoveryReason,
   auth?: { renewAccess?: RenewQoderAccess; retried: boolean; accessToken?: string },
 ): AssistantMessageEventStream {
   const StreamCtor = (PiAi as unknown as { AssistantMessageEventStream: new () => AssistantMessageEventStream })
@@ -202,24 +189,26 @@ function streamQoderAttempt(
         source: "system",
       };
       const baseConfig = cachedConfig || fallbackConfig;
-      const requestedEffort = resolveRequestedThinkingEffort(options?.reasoning as unknown);
-      const appliedEffort =
-        requestedEffort && qoderSupportsThinkingEffort(baseConfig, requestedEffort) ? requestedEffort : undefined;
-      const modelConfig = appliedEffort ? withQoderThinkingEffort(baseConfig, appliedEffort) : baseConfig;
-      modelConfig.key = qoderModel;
+      // Pi omits reasoning when disabled; only send a disable mode the catalog supports.
+      const requestedEffort: unknown = options?.reasoning ?? (baseConfig.thinking_config?.disabled ? false : undefined);
+      const { modelConfig: thinkingConfig, effort: appliedEffort } = applyQoderThinkingOptions(
+        baseConfig,
+        requestedEffort,
+      );
+      const modelConfig = { ...thinkingConfig, key: qoderModel };
+      const thinkingEnabled =
+        requestedEffort === false || requestedEffort === "off"
+          ? false
+          : requestedEffort === true || appliedEffort !== undefined
+            ? true
+            : undefined;
 
       const isReasoning = !!modelConfig.is_reasoning;
       const maxOutputTokens = modelConfig.max_output_tokens || 32768;
 
       const resolvedContext = resolveQoderContext(context);
       const normalizedMessages = transformMessagesForQoder(resolvedContext.messages);
-      const recoveryInstruction =
-        recovery === "incomplete"
-          ? "\n\nThe previous generation ended with reasoning only and no answer or tool call. Complete the latest user task using the supplied conversation and existing tool results. Return a user-facing answer or a real tool call through the tools interface, not just a plan to act. Do not repeat completed tool actions."
-          : recovery === "checkpoint"
-            ? "\n\nThis is not a context-compaction request. Answer the latest user task using the supplied conversation and tool results. Do not replace the answer with an internal conversation checkpoint."
-            : "";
-      const systemText = resolvedContext.systemPrompt + recoveryInstruction;
+      const systemText = resolvedContext.systemPrompt;
       // The gateway forwards OpenAI-style messages, not the top-level system field.
       const messages = systemText
         ? [{ role: "system", content: systemText }, ...normalizedMessages]
@@ -247,10 +236,21 @@ function streamQoderAttempt(
         maxTokens = options.maxTokens;
       }
 
+      const parameters = {
+        max_tokens: maxTokens,
+        ...(options?.temperature !== undefined ? { temperature: options.temperature } : {}),
+        ...(thinkingEnabled !== undefined ? { enable_thinking: thinkingEnabled } : {}),
+        ...(thinkingEnabled === false
+          ? { reasoning_effort: "none" }
+          : appliedEffort
+            ? { reasoning_effort: appliedEffort }
+            : {}),
+      };
+
       const toolsRaw = resolvedContext.tools.length > 0 ? transformTools(resolvedContext.tools) : undefined;
       // Never share one remote conversation across every chat for this account.
       // Tool-free one-off summarization has a separate prompt-scoped identity.
-      const sessionScope = recovery ? crypto.randomUUID() : options?.sessionId || crypto.randomUUID();
+      const sessionScope = options?.sessionId || crypto.randomUUID();
       const sessionID = stableHash(
         "qoder-session",
         providerMode,
@@ -259,7 +259,14 @@ function streamQoderAttempt(
         sessionScope,
         toolsRaw ? "agent" : systemText,
       );
-      const recordID = stableChatRecordID(qoderModel, messages, toolsRaw, maxTokens, sessionID, systemText);
+      const recordID = stableChatRecordID(
+        qoderModel,
+        messages,
+        toolsRaw,
+        { parameters, modelConfig },
+        sessionID,
+        systemText,
+      );
 
       const reqBody: Record<string, unknown> = {
         request_id: crypto.randomUUID(),
@@ -281,10 +288,7 @@ function streamQoderAttempt(
         aliyun_user_type: "",
         messages,
         tools: toolsRaw || [],
-        parameters: {
-          max_tokens: maxTokens,
-          ...(appliedEffort ? { reasoning_effort: appliedEffort } : {}),
-        },
+        parameters,
         chat_context: {
           chatPrompt: "",
           imageUrls: null,
@@ -346,17 +350,38 @@ function streamQoderAttempt(
 
       const modelSource = modelConfig.source || "system";
 
+      const requestHeaders = new Headers({
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Accept-Encoding": "identity",
+        "X-Model-Key": qoderModel,
+        "X-Model-Source": modelSource,
+        ...headers,
+      });
+      const protectedHeaders = new Set([
+        ...Object.keys(headers).map((name) => name.toLowerCase()),
+        "authorization",
+        "proxy-authorization",
+        "host",
+        "content-length",
+        "content-type",
+        "transfer-encoding",
+        "connection",
+        "x-model-key",
+        "x-model-source",
+      ]);
+      for (const [name, value] of Object.entries(options?.headers ?? {})) {
+        if (protectedHeaders.has(name.toLowerCase()) || name.toLowerCase().startsWith("cosy-")) {
+          throw new Error(`Cannot override Qoder-managed header: ${name}`);
+        }
+        if (value === null) requestHeaders.delete(name);
+        else requestHeaders.set(name, value);
+      }
+
       const response = await fetch(chatURL, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "text/event-stream",
-          "Cache-Control": "no-cache",
-          "Accept-Encoding": "identity",
-          "X-Model-Key": qoderModel,
-          "X-Model-Source": modelSource,
-          ...headers,
-        },
+        headers: requestHeaders,
         body: encodedBytes,
         signal: options?.signal,
       });
@@ -388,8 +413,24 @@ function streamQoderAttempt(
       let thinkingBlockIndex = -1;
       const toolCallsState = new Map<number, ToolCallState>();
 
-      // Upstream may emit tagged reasoning even when the requested effort is off.
-      const thinkingParser = new ThinkingTagParser(output, stream);
+      let textBlockIndex = -1;
+      const endContent = () => {
+        if (thinkingBlockIndex !== -1) {
+          const block = output.content[thinkingBlockIndex] as ThinkingContent;
+          stream.push({
+            type: "thinking_end",
+            contentIndex: thinkingBlockIndex,
+            content: block.thinking,
+            partial: output,
+          });
+          thinkingBlockIndex = -1;
+        }
+        if (textBlockIndex !== -1) {
+          const block = output.content[textBlockIndex] as TextContent;
+          stream.push({ type: "text_end", contentIndex: textBlockIndex, content: block.text, partial: output });
+          textBlockIndex = -1;
+        }
+      };
 
       stream.push({ type: "start", partial: output });
       started = true;
@@ -471,6 +512,7 @@ function streamQoderAttempt(
                 // 1. Process reasoning/thinking content (API reasoning)
                 if (delta.reasoning_content) {
                   if (thinkingBlockIndex === -1) {
+                    endContent();
                     thinkingBlockIndex = output.content.length;
                     output.content.push({ type: "thinking", thinking: "" });
                     stream.push({ type: "thinking_start", contentIndex: thinkingBlockIndex, partial: output });
@@ -487,24 +529,26 @@ function streamQoderAttempt(
 
                 // 2. Process text content
                 if (delta.content) {
-                  // End API thinking block if active
-                  if (thinkingBlockIndex !== -1) {
-                    const block = output.content[thinkingBlockIndex] as ThinkingContent;
-                    stream.push({
-                      type: "thinking_end",
-                      contentIndex: thinkingBlockIndex,
-                      content: block.thinking,
-                      partial: output,
-                    });
-                    thinkingBlockIndex = -1;
+                  if (textBlockIndex === -1) {
+                    endContent();
+                    textBlockIndex = output.content.length;
+                    output.content.push({ type: "text", text: "" });
+                    stream.push({ type: "text_start", contentIndex: textBlockIndex, partial: output });
                   }
-
-                  thinkingParser.processChunk(delta.content);
+                  const block = output.content[textBlockIndex] as TextContent;
+                  block.text += delta.content;
+                  stream.push({
+                    type: "text_delta",
+                    contentIndex: textBlockIndex,
+                    delta: delta.content,
+                    partial: output,
+                  });
                 }
 
                 // 3. Process tool calls
                 if (delta.tool_calls && Array.isArray(delta.tool_calls)) {
                   for (const tc of delta.tool_calls) {
+                    endContent();
                     const idx = tc.index ?? 0;
                     let state = toolCallsState.get(idx);
                     if (!state) {
@@ -556,22 +600,14 @@ function streamQoderAttempt(
       options?.signal?.throwIfAborted();
       if (!completed && !finishReason) throw new Error("Qoder stream ended without a completion marker");
 
-      thinkingParser.finalize();
-
-      if (thinkingBlockIndex !== -1) {
-        const block = output.content[thinkingBlockIndex] as ThinkingContent;
-        stream.push({
-          type: "thinking_end",
-          contentIndex: thinkingBlockIndex,
-          content: block.thinking,
-          partial: output,
-        });
-      }
+      endContent();
 
       for (const state of toolCallsState.values()) {
-        const args = parseToolCallArguments(state);
         const block = output.content[state.contentIndex] as ToolCall;
-        block.arguments = args;
+        block.arguments = parseToolCallArguments(state);
+      }
+      for (const state of toolCallsState.values()) {
+        const block = output.content[state.contentIndex] as ToolCall;
         stream.push({
           type: "toolcall_end",
           contentIndex: state.contentIndex,
@@ -579,29 +615,13 @@ function streamQoderAttempt(
             type: "toolCall",
             id: state.id,
             name: state.name,
-            arguments: args,
+            arguments: block.arguments,
           },
           partial: output,
         });
       }
 
       const stopReason = qoderStopReason(finishReason, toolCallsState.size > 0);
-      if (
-        stopReason === "stop" &&
-        toolCallsState.size === 0 &&
-        (thinkingParser.hasUnclosedThinking() ||
-          ((thinkingParser.hasTaggedThinking() || output.content.some((block) => block.type === "thinking")) &&
-            !output.content.some((block) => block.type === "text" && block.text.trim())))
-      ) {
-        throw new Error(
-          "QODER_INCOMPLETE_RESPONSE: Qoder completed with unfinished or thinking-only output and no tool call.",
-        );
-      }
-
-      if (output.content.length === 0 && !thinkingParser.hasTaggedThinking()) {
-        throw new Error("Qoder upstream completed without assistant content");
-      }
-
       output.stopReason = stopReason;
       stream.push({ type: "done", reason: output.stopReason, message: output });
       stream.end();
@@ -618,7 +638,7 @@ function streamQoderAttempt(
         try {
           auth.accessToken = await auth.renewAccess(options?.apiKey ?? "", options?.sessionId);
           options?.signal?.throwIfAborted();
-          const retry = streamQoderAttempt(model, context, { ...options, apiKey: auth.accessToken }, recovery, auth);
+          const retry = streamQoderAttempt(model, context, { ...options, apiKey: auth.accessToken }, auth);
           for await (const event of retry) {
             if (event.type !== "start" || !started) stream.push(event);
           }

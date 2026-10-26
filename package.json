@@ -1,6 +1,6 @@
 {
   "name": "pi-qoder-provider",
-  "version": "0.3.9",
+  "version": "0.3.10",
   "description": "Pi extension for Qoder AI — with OAuth authentication, COSY signatures and WAF bypass",
   "type": "module",
   "license": "MIT",
@@ -29,8 +29,6 @@
     "src/qoder-encoding.ts",
     "src/stream.ts",
     "src/stream-metadata.ts",
-    "src/response-guard.ts",
-    "src/thinking-parser.ts",
     "src/transform.ts",
     "src/usage.ts",
     "src/vpc.ts"
