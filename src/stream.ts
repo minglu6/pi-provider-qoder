@@ -23,6 +23,7 @@ import {
   logCosyRequest,
   logCosyResponse,
 } from "./cosy.js";
+import { type DsmlAttempt, streamWithDsmlRecovery } from "./dsml-stream.js";
 import { applyQoderThinkingOptions, getCachedModelConfig, type QoderModelEntry } from "./models.js";
 import { resolveQoderIdentity } from "./oauth.js";
 import { qoderEncodeBody } from "./qoder-encoding.js";
@@ -124,6 +125,14 @@ export function streamQoder(
   renewAccess?: RenewQoderAccess,
 ): AssistantMessageEventStream {
   const auth = { renewAccess, retried: false, accessToken: options?.apiKey };
+  if (/deepseek/i.test(`${model.id} ${model.name}`) || /^(?:d|df)model$/u.test(model.id)) {
+    const { tools } = resolveQoderContext(context);
+    if (tools.length) {
+      return streamWithDsmlRecovery(model, context, tools, options, (cleanContext, inspection) =>
+        streamQoderAttempt(model, cleanContext, { ...options, apiKey: auth.accessToken }, auth, inspection),
+      );
+    }
+  }
   return streamQoderAttempt(model, context, options, auth);
 }
 
@@ -132,6 +141,7 @@ function streamQoderAttempt(
   context: QoderContext,
   options?: SimpleStreamOptions,
   auth?: { renewAccess?: RenewQoderAccess; retried: boolean; accessToken?: string },
+  inspection?: DsmlAttempt,
 ): AssistantMessageEventStream {
   const StreamCtor = (PiAi as unknown as { AssistantMessageEventStream: new () => AssistantMessageEventStream })
     .AssistantMessageEventStream;
@@ -250,7 +260,7 @@ function streamQoderAttempt(
       const toolsRaw = resolvedContext.tools.length > 0 ? transformTools(resolvedContext.tools) : undefined;
       // Never share one remote conversation across every chat for this account.
       // Tool-free one-off summarization has a separate prompt-scoped identity.
-      const sessionScope = options?.sessionId || crypto.randomUUID();
+      const sessionScope = inspection?.regeneration || options?.sessionId || crypto.randomUUID();
       const sessionID = stableHash(
         "qoder-session",
         providerMode,
@@ -276,7 +286,7 @@ function streamQoderAttempt(
         stream: true,
         chat_task: "FREE_INPUT",
         is_reply: true,
-        is_retry: false,
+        is_retry: !!inspection?.regeneration,
         source: 1,
         version: "3",
         session_type: "qodercli",
@@ -332,6 +342,17 @@ function streamQoderAttempt(
       }
 
       const payload = (await options?.onPayload?.(reqBody, model)) ?? reqBody;
+      if (inspection) {
+        inspection.allowRecovery =
+          typeof payload === "object" &&
+          payload !== null &&
+          "tools" in payload &&
+          (!("tool_choice" in payload) ||
+            payload.tool_choice === undefined ||
+            payload.tool_choice === "auto" ||
+            payload.tool_choice === "required") &&
+          JSON.stringify(payload.tools) === JSON.stringify(transformTools(resolvedContext.tools));
+      }
       options?.signal?.throwIfAborted();
       const bodyBytes = Buffer.from(JSON.stringify(payload));
       const encodedBody = qoderEncodeBody(bodyBytes);
@@ -601,6 +622,10 @@ function streamQoderAttempt(
       if (!completed && !finishReason) throw new Error("Qoder stream ended without a completion marker");
 
       endContent();
+      if (inspection) {
+        inspection.complete = true;
+        inspection.finishReason = finishReason;
+      }
 
       for (const state of toolCallsState.values()) {
         const block = output.content[state.contentIndex] as ToolCall;
@@ -638,7 +663,7 @@ function streamQoderAttempt(
         try {
           auth.accessToken = await auth.renewAccess(options?.apiKey ?? "", options?.sessionId);
           options?.signal?.throwIfAborted();
-          const retry = streamQoderAttempt(model, context, { ...options, apiKey: auth.accessToken }, auth);
+          const retry = streamQoderAttempt(model, context, { ...options, apiKey: auth.accessToken }, auth, inspection);
           for await (const event of retry) {
             if (event.type !== "start" || !started) stream.push(event);
           }

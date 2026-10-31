@@ -317,6 +317,290 @@ describe("streamQoder SSE handling", () => {
     expect(mocks.fetch).toHaveBeenCalledTimes(1);
   });
 
+  const danglingDsml = ["</｜｜DSML｜｜ parameter>", "</｜｜DSML｜｜ invoke>", "</｜｜DSML｜｜ calls>"].join("\n");
+
+  const rawBash =
+    '<｜DSML｜tool_calls><｜DSML｜invoke name="bash"><｜DSML｜parameter name="command" string="true">printf safe</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>';
+
+  it.each([
+    "stop",
+    "tool_calls",
+    undefined,
+  ])("recovers a complete split DSML call without duplicating execution (%s)", async (finishReason) => {
+    const text = `Checking now.\n${rawBash}`;
+    mocks.fetch.mockResolvedValue(
+      responseWithSse(
+        ...Array.from(text, (content) => envelope({ choices: [{ delta: { content } }] })),
+        envelope({ choices: [{ finish_reason: finishReason }] }),
+        "[DONE]",
+      ),
+    );
+    const stream = streamQoder(model, agentContext, options);
+    const events = [];
+    for await (const event of stream) events.push(event);
+    const result = await stream.result();
+    expect(result.stopReason).toBe("toolUse");
+    expect(result.content).toEqual([
+      { type: "text", text: "Checking now.\n" },
+      { type: "toolCall", id: expect.any(String), name: "bash", arguments: { command: "printf safe" } },
+    ]);
+    expect(events.filter((event) => event.type === "toolcall_end")).toHaveLength(1);
+    expect(
+      events
+        .filter((event) => event.type === "text_delta")
+        .map((event) => event.delta)
+        .join(""),
+    ).toBe("Checking now.\n");
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    "stop",
+    "tool_calls",
+    undefined,
+  ])("regenerates a dangling trailer once without replaying the damaged turn (%s)", async (finishReason) => {
+    mocks.fetch
+      .mockResolvedValueOnce(
+        responseWithSse(
+          envelope({
+            choices: [{ delta: { content: `Checking now.${danglingDsml}` }, finish_reason: finishReason }],
+            usage: { prompt_tokens: 7, completion_tokens: 3 },
+          }),
+          "[DONE]",
+        ),
+      )
+      .mockResolvedValueOnce(
+        responseWithSse(
+          envelope({
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    { index: 0, id: "retry-call", function: { name: "bash", arguments: '{"command":"printf safe"}' } },
+                  ],
+                },
+                finish_reason: "tool_calls",
+              },
+            ],
+            usage: { prompt_tokens: 11, completion_tokens: 5 },
+          }),
+          "[DONE]",
+        ),
+      );
+    const stream = streamQoder(model, agentContext, { ...options, sessionId: "host-session" });
+    const events = [];
+    for await (const event of stream) events.push(event);
+    const result = await stream.result();
+    expect(result.stopReason).toBe("toolUse");
+    expect(result.content).toEqual([
+      { type: "toolCall", id: "retry-call", name: "bash", arguments: { command: "printf safe" } },
+    ]);
+    expect(result.usage).toMatchObject({ input: 18, output: 8, totalTokens: 26 });
+    expect(events.filter((event) => event.type === "start")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "toolcall_end")).toHaveLength(1);
+    expect(events.some((event) => event.type === "error" || event.type === "text_delta")).toBe(false);
+    expect(mocks.fetch).toHaveBeenCalledTimes(2);
+    const bodies = mocks.fetch.mock.calls.map((call) => JSON.parse(call[1].body.toString("utf8")));
+    expect(bodies[1].messages).toEqual(bodies[0].messages);
+    expect(bodies[1].tools).toEqual(bodies[0].tools);
+    expect(bodies[1].session_id).not.toBe(bodies[0].session_id);
+    expect(bodies[1].chat_record_id).not.toBe(bodies[0].chat_record_id);
+    expect(bodies[1].is_retry).toBe(true);
+  });
+
+  it("stops after one regeneration and withholds malformed calls from the host", async () => {
+    mocks.fetch.mockImplementation(() => textResponse(rawBash.replace('name="command"', 'name="missing"')));
+    const stream = streamQoder(model, agentContext, options);
+    const events = [];
+    for await (const event of stream) events.push(event);
+    const result = await stream.result();
+    expect(result.stopReason).toBe("error");
+    expect(result.errorMessage).toContain("DSML");
+    expect(result.content).toEqual([]);
+    expect(events.map((event) => event.type)).toEqual(["start", "error"]);
+    expect(mocks.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not regenerate or duplicate a native call even if raw DSML accompanies it", async () => {
+    mocks.fetch.mockResolvedValue(
+      responseWithSse(
+        envelope({
+          choices: [
+            {
+              delta: {
+                content: rawBash,
+                tool_calls: [
+                  { index: 0, id: "native", function: { name: "bash", arguments: '{"command":"printf safe"}' } },
+                ],
+              },
+              finish_reason: "tool_calls",
+            },
+          ],
+        }),
+        "[DONE]",
+      ),
+    );
+    const stream = streamQoder(model, agentContext, options);
+    const events = [];
+    for await (const event of stream) events.push(event);
+    const result = await stream.result();
+    expect(result.stopReason).toBe("toolUse");
+    expect(result.content.filter((block) => block.type === "toolCall")).toEqual([
+      { type: "toolCall", id: "native", name: "bash", arguments: { command: "printf safe" } },
+    ]);
+    expect(events.filter((event) => event.type === "toolcall_end")).toHaveLength(1);
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("never dispatches a call from reasoning text", async () => {
+    mocks.fetch
+      .mockResolvedValueOnce(
+        responseWithSse(
+          envelope({ choices: [{ delta: { reasoning_content: rawBash }, finish_reason: "stop" }] }),
+          "[DONE]",
+        ),
+      )
+      .mockResolvedValueOnce(textResponse("Please provide a valid request."));
+    const result = await streamQoder(model, agentContext, options).result();
+    expect(result.content).toEqual([{ type: "text", text: "Please provide a valid request." }]);
+    expect(result.stopReason).toBe("stop");
+    expect(mocks.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("discards an entire recovered batch if a later call is invalid", async () => {
+    const invalidBatch = rawBash.replace(
+      "</｜DSML｜tool_calls>",
+      rawBash.replace('name="bash"', 'name="unknown"').replace("<｜DSML｜tool_calls>", ""),
+    );
+    mocks.fetch
+      .mockResolvedValueOnce(textResponse(invalidBatch))
+      .mockResolvedValueOnce(textResponse("Unable to call the tool."));
+    const stream = streamQoder(model, agentContext, options);
+    const events = [];
+    for await (const event of stream) events.push(event);
+    const result = await stream.result();
+    expect(result.content).toEqual([{ type: "text", text: "Unable to call the tool." }]);
+    expect(events.some((event) => event.type === "toolcall_start" || event.type === "toolcall_end")).toBe(false);
+    expect(mocks.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["removed", "none"])("respects tools disabled by the payload hook (%s)", async (mode) => {
+    mocks.fetch.mockResolvedValue(textResponse(rawBash));
+    const result = await streamQoder(model, agentContext, {
+      ...options,
+      onPayload: (payload: unknown) => {
+        if (typeof payload !== "object" || payload === null) throw new Error("Expected object payload");
+        return mode === "removed" ? { ...payload, tools: [] } : { ...payload, tool_choice: "none" };
+      },
+    }).result();
+    expect(result.stopReason).toBe("stop");
+    expect(result.content).toEqual([{ type: "text", text: rawBash }]);
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("streams native calls before transport completion and never regenerates their invalid arguments", async () => {
+    let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const encoder = new TextEncoder();
+    mocks.fetch.mockResolvedValue(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(value) {
+            controller = value;
+            value.enqueue(
+              encoder.encode(
+                `data: ${envelope({ choices: [{ delta: { tool_calls: [{ index: 0, id: "native", function: { name: "bash", arguments: '{"command":' } }] } }] })}\n\n`,
+              ),
+            );
+          },
+        }),
+      ),
+    );
+    const stream = streamQoder(model, agentContext, options);
+    const events = [];
+    for await (const event of stream) {
+      events.push(event);
+      if (event.type === "toolcall_start") {
+        controller?.enqueue(
+          encoder.encode(`data: ${envelope({ choices: [{ finish_reason: "tool_calls" }] })}\n\ndata: [DONE]\n\n`),
+        );
+        controller?.close();
+      }
+    }
+    expect((await stream.result()).stopReason).toBe("error");
+    expect(events.some((event) => event.type === "toolcall_start")).toBe(true);
+    expect(events.some((event) => event.type === "toolcall_end")).toBe(false);
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not regenerate a canceled malformed response", async () => {
+    const controller = new AbortController();
+    mocks.fetch.mockResolvedValue(textResponse(danglingDsml));
+    const result = await streamQoder(model, agentContext, {
+      ...options,
+      signal: controller.signal,
+      onProviderStreamEvent: () => controller.abort(),
+    } as SimpleStreamOptions).result();
+    expect(result.stopReason).toBe("aborted");
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("removes damaged assistant turns from a long history without dropping valid call/result pairs", async () => {
+    mockTextResponse();
+    const longContext = {
+      ...agentContext,
+      messages: [
+        ...Array.from({ length: 60 }, (_, index) => [
+          {
+            role: "assistant",
+            content: [{ type: "toolCall", id: `old-${index}`, name: "bash", arguments: { command: "pwd" } }],
+            stopReason: "toolUse",
+            timestamp: index,
+          },
+          {
+            role: "toolResult",
+            toolCallId: `old-${index}`,
+            toolName: "bash",
+            content: [{ type: "text", text: `/fixture/${index}` }],
+            isError: false,
+            timestamp: index,
+          },
+        ]).flat(),
+        {
+          role: "assistant",
+          content: [{ type: "text", text: `Continue.${danglingDsml}` }],
+          stopReason: "stop",
+          timestamp: 100,
+        },
+        { role: "user", content: "Continue checking", timestamp: 101 },
+      ],
+    } as unknown as Context;
+    await streamQoder(model, longContext, options).result();
+    const messages = requestBody().messages;
+    expect(messages.filter((message: { role: string }) => message.role === "assistant")).toHaveLength(60);
+    for (let index = 0; index < 60; index++) {
+      expect(messages[index * 2].tool_calls[0].id).toBe(`old-${index}`);
+      expect(messages[index * 2 + 1].tool_call_id).toBe(`old-${index}`);
+    }
+    expect(JSON.stringify(messages)).not.toContain("DSML");
+    expect(longContext.messages).toHaveLength(122);
+  });
+
+  it.each([
+    { text: danglingDsml, tools: false, finish: "stop" },
+    { text: danglingDsml, tools: true, finish: "length" },
+    { text: `\`\`\`xml\n${danglingDsml}\n\`\`\``, tools: true, finish: "stop" },
+    { text: `~~~xml\n${danglingDsml}`, tools: true, finish: "stop" },
+    { text: `The closing sequence is \`${danglingDsml}\`.`, tools: true, finish: "stop" },
+  ])("preserves literal DSML examples and length status: %j", async ({ text, tools, finish }) => {
+    mocks.fetch.mockResolvedValue(
+      responseWithSse(envelope({ choices: [{ delta: { content: text }, finish_reason: finish }] }), "[DONE]"),
+    );
+    const result = await streamQoder(model, tools ? agentContext : context, options).result();
+    expect(result.stopReason).toBe(finish);
+    expect(result.content).toEqual([{ type: "text", text }]);
+    expect(result.errorMessage).toBeUndefined();
+  });
+
   it.each([
     "The marker <｜｜DSML｜｜ calls> belongs to the tool protocol.",
     "```xml\n<｜DSML｜tool_calls>\n```",
