@@ -179,6 +179,9 @@ export function getQoderCNFriendlyModelInfo(key: string, display?: string): { id
 }
 
 export function toQoderCNFriendlyModel<T extends { id: string; name: string }>(model: T): T {
+  // Cached catalog models are already friendly. Recomputing the id from the name
+  // would drop the "(wire key)" suffix that keeps duplicate display names distinct.
+  if (/·\s*Qoder CN\s*$/i.test(model.name)) return model;
   const info = getQoderCNFriendlyModelInfo(model.id, model.name);
   return {
     ...model,

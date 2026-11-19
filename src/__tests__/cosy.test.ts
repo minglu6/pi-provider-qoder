@@ -373,4 +373,14 @@ describe("toQoderCNFriendlyModel", () => {
     expect(result.id).toBe("CustomModel V2-Pro");
     expect(result.name).toContain("Qoder CN");
   });
+
+  it("is idempotent for cached models, keeping duplicate-name disambiguation", () => {
+    // updateQoderModelsCache already stores friendly ids; a second display name
+    // collision is stored as "<label> (<wire key>)" and must stay distinct.
+    const first = toQoderCNFriendlyModel({ id: "qmodel_a", name: "Qwen3.7-Max" });
+    const second = toQoderCNFriendlyModel({ id: `${first.id} (qmodel_b)`, name: first.name });
+    expect(toQoderCNFriendlyModel(first)).toEqual(first);
+    expect(second.id).toBe("Qwen 3.7-Max (qmodel_b)");
+    expect(second.id).not.toBe(first.id);
+  });
 });
